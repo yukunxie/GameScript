@@ -69,6 +69,7 @@ public:
 
 private:
     char peek() const;
+    char peekNext() const;
     char advance();
     bool isAtEnd() const;
     void skipWhitespace();

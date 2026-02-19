@@ -1,14 +1,39 @@
 #include "gs/type_system.hpp"
 
+#include <sstream>
 #include <stdexcept>
 
 namespace gs {
+
+Type::Type() {
+    registerMethodAttribute("__str__", 0, [this](Object& self,
+                                                 const std::vector<Value>& args,
+                                                 const StringFactory& makeString,
+                                                 const ValueStrInvoker& valueStr) {
+        (void)args;
+        return makeString(__str__(self, valueStr));
+    });
+}
 
 void Type::registerMethodAttribute(const std::string& name, std::size_t argc, MethodInvoker invoker) {
     AttributeEntry entry;
     entry.argc = argc;
     entry.method = std::move(invoker);
     attributes_[name] = std::move(entry);
+}
+
+void Type::registerMethodAttribute(const std::string& name, std::size_t argc, SimpleMethodInvoker invoker) {
+    registerMethodAttribute(
+        name,
+        argc,
+        [simple = std::move(invoker)](Object& self,
+                                      const std::vector<Value>& args,
+                                      const StringFactory& makeString,
+                                      const ValueStrInvoker& valueStr) {
+            (void)makeString;
+            (void)valueStr;
+            return simple(self, args);
+        });
 }
 
 void Type::registerMemberAttribute(const std::string& name, GetterInvoker getter, SetterInvoker setter) {
@@ -18,27 +43,17 @@ void Type::registerMemberAttribute(const std::string& name, GetterInvoker getter
     attributes_[name] = std::move(entry);
 }
 
-Value Type::callMethod(Object& self, const std::string& method, const std::vector<Value>& args) const {
+Value Type::callMethod(Object& self,
+                       const std::string& method,
+                       const std::vector<Value>& args,
+                       const StringFactory& makeString,
+                       const ValueStrInvoker& valueStr) const {
     auto it = attributes_.find(method);
     if (it != attributes_.end() && it->second.method) {
         if (args.size() != it->second.argc) {
             throw std::runtime_error(std::string(name()) + "." + method + " argument count mismatch");
         }
-        return it->second.method(self, args);
-    }
-
-    if (method.rfind("get_", 0) == 0) {
-        if (!args.empty()) {
-            throw std::runtime_error(std::string(name()) + "." + method + " argument count mismatch");
-        }
-        return getMember(self, method.substr(4));
-    }
-
-    if (method.rfind("set_", 0) == 0) {
-        if (args.size() != 1) {
-            throw std::runtime_error(std::string(name()) + "." + method + " argument count mismatch");
-        }
-        return setMember(self, method.substr(4), args[0]);
+        return it->second.method(self, args, makeString, valueStr);
     }
 
     throw std::runtime_error("Unknown " + std::string(name()) + " method: " + method);
@@ -63,6 +78,11 @@ Value Type::setMember(Object& self, const std::string& member, const Value& valu
     (void)self;
     (void)value;
     throw std::runtime_error("Unknown or read-only " + std::string(name()) + " member: " + member);
+}
+
+std::string Type::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    (void)valueStr;
+    return std::string(name()) + "#" + std::to_string(self.objectId());
 }
 
 ListObject::ListObject(const Type& typeRef) : type_(&typeRef) {}
@@ -102,6 +122,13 @@ const char* ListType::name() const {
 }
 
 ListType::ListType() {
+    registerMethodAttribute("__str__", 0, [this](Object& self,
+                                                  const std::vector<Value>& args,
+                                                  const StringFactory& makeString,
+                                                  const ValueStrInvoker& valueStr) {
+        (void)args;
+        return makeString(__str__(self, valueStr));
+    });
     registerMethod("push", 1, &ListType::methodPush);
     registerMethod("get", 1, &ListType::methodGet);
     registerMethod("set", 2, &ListType::methodSet);
@@ -120,8 +147,12 @@ void ListType::registerMethod(const std::string& name, std::size_t argc, MethodH
     });
 }
 
-Value ListType::callMethod(Object& self, const std::string& method, const std::vector<Value>& args) const {
-    return Type::callMethod(self, method, args);
+Value ListType::callMethod(Object& self,
+                           const std::string& method,
+                           const std::vector<Value>& args,
+                           const StringFactory& makeString,
+                           const ValueStrInvoker& valueStr) const {
+    return Type::callMethod(self, method, args, makeString, valueStr);
 }
 
 Value ListType::getMember(Object& self, const std::string& member) const {
@@ -130,6 +161,20 @@ Value ListType::getMember(Object& self, const std::string& member) const {
 
 Value ListType::setMember(Object& self, const std::string& member, const Value& value) const {
     return Type::setMember(self, member, value);
+}
+
+std::string ListType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    auto& list = requireList(self);
+    std::ostringstream ss;
+    ss << "[";
+    for (std::size_t i = 0; i < list.data().size(); ++i) {
+        if (i > 0) {
+            ss << ", ";
+        }
+        ss << valueStr(list.data()[i]);
+    }
+    ss << "]";
+    return ss.str();
 }
 
 ListObject& ListType::requireList(Object& self) {
@@ -198,6 +243,13 @@ const char* DictType::name() const {
 }
 
 DictType::DictType() {
+    registerMethodAttribute("__str__", 0, [this](Object& self,
+                                                  const std::vector<Value>& args,
+                                                  const StringFactory& makeString,
+                                                  const ValueStrInvoker& valueStr) {
+        (void)args;
+        return makeString(__str__(self, valueStr));
+    });
     registerMethod("set", 2, &DictType::methodSet);
     registerMethod("get", 1, &DictType::methodGet);
     registerMethod("del", 1, &DictType::methodDel);
@@ -217,8 +269,12 @@ void DictType::registerMethod(const std::string& name, std::size_t argc, MethodH
     });
 }
 
-Value DictType::callMethod(Object& self, const std::string& method, const std::vector<Value>& args) const {
-    return Type::callMethod(self, method, args);
+Value DictType::callMethod(Object& self,
+                           const std::string& method,
+                           const std::vector<Value>& args,
+                           const StringFactory& makeString,
+                           const ValueStrInvoker& valueStr) const {
+    return Type::callMethod(self, method, args, makeString, valueStr);
 }
 
 Value DictType::getMember(Object& self, const std::string& member) const {
@@ -227,6 +283,22 @@ Value DictType::getMember(Object& self, const std::string& member) const {
 
 Value DictType::setMember(Object& self, const std::string& member, const Value& value) const {
     return Type::setMember(self, member, value);
+}
+
+std::string DictType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    auto& dict = requireDict(self);
+    std::ostringstream ss;
+    ss << "{";
+    bool first = true;
+    for (const auto& kv : dict.data()) {
+        if (!first) {
+            ss << ", ";
+        }
+        first = false;
+        ss << kv.first << ": " << valueStr(kv.second);
+    }
+    ss << "}";
+    return ss.str();
 }
 
 DictObject& DictType::requireDict(Object& self) {
@@ -320,8 +392,24 @@ const char* FunctionType::name() const {
     return "Function";
 }
 
-ScriptInstanceObject::ScriptInstanceObject(const Type& typeRef, std::size_t classIndex)
-    : type_(&typeRef), classIndex_(classIndex) {}
+FunctionType::FunctionType() {
+    registerMethodAttribute("__str__", 0, [this](Object& self,
+                                                  const std::vector<Value>& args,
+                                                  const StringFactory& makeString,
+                                                  const ValueStrInvoker& valueStr) {
+        (void)args;
+        return makeString(__str__(self, valueStr));
+    });
+}
+
+std::string FunctionType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    (void)self;
+    (void)valueStr;
+    return "[Function]";
+}
+
+ScriptInstanceObject::ScriptInstanceObject(const Type& typeRef, std::size_t classIndex, std::string className)
+    : type_(&typeRef), classIndex_(classIndex), className_(std::move(className)) {}
 
 const Type& ScriptInstanceObject::getType() const {
     return *type_;
@@ -329,6 +417,10 @@ const Type& ScriptInstanceObject::getType() const {
 
 std::size_t ScriptInstanceObject::classIndex() const {
     return classIndex_;
+}
+
+const std::string& ScriptInstanceObject::className() const {
+    return className_;
 }
 
 std::unordered_map<std::string, Value>& ScriptInstanceObject::fields() {
@@ -343,16 +435,38 @@ const char* ScriptInstanceType::name() const {
     return "Instance";
 }
 
-Value ScriptInstanceType::callMethod(Object& self, const std::string& method, const std::vector<Value>& args) const {
+ScriptInstanceType::ScriptInstanceType() {
+    registerMethodAttribute("__str__", 0, [this](Object& self,
+                                                  const std::vector<Value>& args,
+                                                  const StringFactory& makeString,
+                                                  const ValueStrInvoker& valueStr) {
+        (void)args;
+        return makeString(__str__(self, valueStr));
+    });
+}
+
+Value ScriptInstanceType::callMethod(Object& self,
+                                     const std::string& method,
+                                     const std::vector<Value>& args,
+                                     const StringFactory& makeString,
+                                     const ValueStrInvoker& valueStr) const {
     auto* instance = dynamic_cast<ScriptInstanceObject*>(&self);
     if (!instance) {
         throw std::runtime_error("ScriptInstanceType called with non-instance object");
     }
 
     (void)instance;
-    (void)args;
+    return Type::callMethod(self, method, args, makeString, valueStr);
+}
 
-    throw std::runtime_error("Unknown Instance method: " + method);
+std::string ScriptInstanceType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    auto* instance = dynamic_cast<ScriptInstanceObject*>(&self);
+    if (!instance) {
+        throw std::runtime_error("ScriptInstanceType called with non-instance object");
+    }
+
+    (void)valueStr;
+    return instance->className() + "#" + std::to_string(instance->objectId());
 }
 
 } // namespace gs

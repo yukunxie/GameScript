@@ -121,6 +121,13 @@ char Tokenizer::peek() const {
     return source_[index_];
 }
 
+char Tokenizer::peekNext() const {
+    if (index_ + 1 >= source_.size()) {
+        return '\0';
+    }
+    return source_[index_ + 1];
+}
+
 char Tokenizer::advance() {
     const char c = source_[index_++];
     if (c == '\n') {
@@ -146,6 +153,36 @@ void Tokenizer::skipWhitespace() {
         if (c == '#') {
             while (!isAtEnd() && peek() != '\n') {
                 advance();
+            }
+            continue;
+        }
+        if (c == '/' && peekNext() == '/') {
+            advance();
+            advance();
+            while (!isAtEnd() && peek() != '\n') {
+                advance();
+            }
+            continue;
+        }
+        if (c == '/' && peekNext() == '*') {
+            const std::size_t startLine = line_;
+            const std::size_t startColumn = column_;
+            advance();
+            advance();
+            bool closed = false;
+            while (!isAtEnd()) {
+                if (peek() == '*' && peekNext() == '/') {
+                    advance();
+                    advance();
+                    closed = true;
+                    break;
+                }
+                advance();
+            }
+            if (!closed) {
+                throw std::runtime_error("Unterminated block comment at " +
+                                         std::to_string(startLine) + ":" +
+                                         std::to_string(startColumn));
             }
             continue;
         }

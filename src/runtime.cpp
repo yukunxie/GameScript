@@ -1,4 +1,5 @@
 #include "gs/runtime.hpp"
+#include "gs/global.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -50,7 +51,9 @@ std::string resolveSourcePath(const std::string& path, const std::vector<std::st
 Runtime::Runtime()
     : module_(std::make_shared<Module>()),
       pool_(std::max<std::size_t>(2, std::thread::hardware_concurrency())),
-      tasks_(pool_) {}
+            tasks_(pool_) {
+        bindGlobalModule(hosts_);
+}
 
 HostRegistry& Runtime::host() {
     return hosts_;

@@ -10,6 +10,7 @@ option(GS_BUILD_DEMO "Build demo runtime app" ON)
 
 set(GS_LIB_SOURCES
     src/binding.cpp
+    src/global.cpp
     src/type_system.cpp
     src/tokenizer.cpp
     src/parser.cpp
@@ -22,6 +23,7 @@ set(GS_LIB_SOURCES
 
 set(GS_LIB_HEADERS
     include/gs/binding.hpp
+    include/gs/global.hpp
     include/gs/bytecode.hpp
     include/gs/compiler.hpp
     include/gs/parser.hpp

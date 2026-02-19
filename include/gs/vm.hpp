@@ -32,8 +32,7 @@ struct ExecutionContext {
     Value returnValue{Value::Nil()};
     std::shared_ptr<const Module> modulePin;
     std::vector<std::string> stringPool;
-    std::unordered_map<std::int64_t, std::unique_ptr<Object>> objectHeap;
-    std::int64_t nextObjectId{1};
+    std::unordered_map<std::uint64_t, std::unique_ptr<Object>> objectHeap;
 };
 
 class VirtualMachine {
@@ -52,7 +51,7 @@ private:
                               const Module& module,
                               std::size_t functionIndex,
                               const std::vector<Value>& args);
-    std::size_t findClassMethod(std::size_t classIndex, const std::string& methodName) const;
+    bool tryFindClassMethod(std::size_t classIndex, const std::string& methodName, std::size_t& outFunctionIndex) const;
 
     Object& getObject(ExecutionContext& context, const Value& ref);
 

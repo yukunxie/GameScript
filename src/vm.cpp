@@ -1,11 +1,13 @@
 #include "gs/vm.hpp"
 
 #include <chrono>
-#include <iostream>
+#include <atomic>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace gs {
 
@@ -39,7 +41,64 @@ const std::string& getString(const ExecutionContext& context, const Value& value
     return context.stringPool[idx];
 }
 
-std::string stringifyValue(const ExecutionContext& context, const Value& value) {
+std::string __str__ValueImpl(const ExecutionContext& context,
+                             const Value& value,
+                             std::unordered_set<std::uint64_t>& visitingRefs);
+
+std::uint64_t nextGlobalObjectId() {
+    static std::atomic<std::uint64_t> nextId{1};
+    return nextId.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::uint64_t toObjectId(const Value& ref) {
+    const std::int64_t rawId = ref.asRef();
+    if (rawId < 0) {
+        throw std::runtime_error("Object reference id is negative");
+    }
+    return static_cast<std::uint64_t>(rawId);
+}
+
+Value makeRefValue(std::uint64_t objectId) {
+    constexpr auto kMaxRefId = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    if (objectId > kMaxRefId) {
+        throw std::runtime_error("Object reference id overflow");
+    }
+    return Value::Ref(static_cast<std::int64_t>(objectId));
+}
+
+Value emplaceObject(ExecutionContext& context, std::unique_ptr<Object> object) {
+    const std::uint64_t id = nextGlobalObjectId();
+    object->setObjectId(id);
+    context.objectHeap.emplace(id, std::move(object));
+    return makeRefValue(id);
+}
+
+std::string __str__RefObject(const ExecutionContext& context,
+                             std::uint64_t objectId,
+                             std::unordered_set<std::uint64_t>& visitingRefs) {
+    auto it = context.objectHeap.find(objectId);
+    if (it == context.objectHeap.end() || !it->second) {
+        return "ref(" + std::to_string(objectId) + ")";
+    }
+
+    if (visitingRefs.contains(objectId)) {
+        return "[Circular]";
+    }
+
+    visitingRefs.insert(objectId);
+    Object& object = *(it->second);
+    const auto valueStr = [&](const Value& nested) {
+        return __str__ValueImpl(context, nested, visitingRefs);
+    };
+    std::string out = object.getType().__str__(object, valueStr);
+
+    visitingRefs.erase(objectId);
+    return out;
+}
+
+std::string __str__ValueImpl(const ExecutionContext& context,
+                             const Value& value,
+                             std::unordered_set<std::uint64_t>& visitingRefs) {
     switch (value.type) {
     case ValueType::Nil:
         return "nil";
@@ -48,11 +107,43 @@ std::string stringifyValue(const ExecutionContext& context, const Value& value) 
     case ValueType::String:
         return getString(context, value);
     case ValueType::Ref:
-        return "ref(" + std::to_string(value.payload) + ")";
+        return __str__RefObject(context, toObjectId(value), visitingRefs);
     case ValueType::Function:
-        return "fn(" + std::to_string(value.payload) + ")";
+        return "[Function]";
     }
     return "";
+}
+
+std::string __str__Value(const ExecutionContext& context, const Value& value) {
+    std::unordered_set<std::uint64_t> visitingRefs;
+    return __str__ValueImpl(context, value, visitingRefs);
+}
+
+std::string typeNameOfValue(const ExecutionContext& context, const Value& value) {
+    switch (value.type) {
+    case ValueType::Nil:
+        return "nil";
+    case ValueType::Int:
+        return "int";
+    case ValueType::String:
+        return "string";
+    case ValueType::Function:
+        return "function";
+    case ValueType::Ref:
+        break;
+    }
+
+    const auto objectId = toObjectId(value);
+    auto it = context.objectHeap.find(objectId);
+    if (it == context.objectHeap.end() || !it->second) {
+        return "ref";
+    }
+
+    Object& object = *(it->second);
+    if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
+        return instance->className();
+    }
+    return object.getType().name();
 }
 
 Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
@@ -75,20 +166,38 @@ public:
     explicit VmHostContext(ExecutionContext& context) : context_(context) {}
 
     Value createObject(std::unique_ptr<Object> object) override {
-        const std::int64_t id = context_.nextObjectId++;
-        context_.objectHeap.emplace(id, std::move(object));
-        return Value::Ref(id);
+        return emplaceObject(context_, std::move(object));
+    }
+
+    Value createString(const std::string& text) override {
+        return makeRuntimeString(context_, text);
     }
 
     Object& getObject(const Value& ref) override {
         if (!ref.isRef()) {
             throw std::runtime_error("Host context expects object reference");
         }
-        auto it = context_.objectHeap.find(ref.asRef());
+        const std::uint64_t objectId = toObjectId(ref);
+        auto it = context_.objectHeap.find(objectId);
         if (it == context_.objectHeap.end() || !it->second) {
             throw std::runtime_error("Host object reference not found");
         }
         return *(it->second);
+    }
+
+    std::string __str__(const Value& value) override {
+        return __str__Value(context_, value);
+    }
+
+    std::string typeName(const Value& value) override {
+        return typeNameOfValue(context_, value);
+    }
+
+    std::uint64_t objectId(const Value& ref) override {
+        if (!ref.isRef()) {
+            throw std::runtime_error("id() requires object reference");
+        }
+        return toObjectId(ref);
     }
 
 private:
@@ -96,9 +205,7 @@ private:
 };
 
 Value makeFunctionObject(ExecutionContext& context, FunctionType& functionType, std::size_t functionIndex) {
-    const std::int64_t id = context.nextObjectId++;
-    context.objectHeap.emplace(id, std::make_unique<FunctionObject>(functionType, functionIndex));
-    return Value::Ref(id);
+    return emplaceObject(context, std::make_unique<FunctionObject>(functionType, functionIndex));
 }
 
 Value normalizeFunctionValue(ExecutionContext& context,
@@ -147,18 +254,21 @@ std::size_t VirtualMachine::findFunctionIndex(const std::string& name) const {
     throw std::runtime_error("Script function not found: " + name);
 }
 
-std::size_t VirtualMachine::findClassMethod(std::size_t classIndex, const std::string& methodName) const {
+bool VirtualMachine::tryFindClassMethod(std::size_t classIndex,
+                                        const std::string& methodName,
+                                        std::size_t& outFunctionIndex) const {
     std::int32_t index = static_cast<std::int32_t>(classIndex);
     while (index >= 0) {
         const auto& cls = module_->classes.at(static_cast<std::size_t>(index));
         for (const auto& method : cls.methods) {
             if (method.name == methodName) {
-                return method.functionIndex;
+                outFunctionIndex = method.functionIndex;
+                return true;
             }
         }
         index = cls.baseClassIndex;
     }
-    throw std::runtime_error("Method not found in class hierarchy: " + methodName);
+    return false;
 }
 
 void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
@@ -184,7 +294,7 @@ Object& VirtualMachine::getObject(ExecutionContext& context, const Value& ref) {
     if (!ref.isRef()) {
         throw std::runtime_error("Method target is not an object reference");
     }
-    auto it = context.objectHeap.find(ref.asRef());
+    auto it = context.objectHeap.find(toObjectId(ref));
     if (it == context.objectHeap.end() || !it->second) {
         throw std::runtime_error("Object reference not found");
     }
@@ -247,7 +357,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             if (lhs.isInt() && rhs.isInt()) {
                 frame.stack.push_back(Value::Int(lhs.asInt() + rhs.asInt()));
             } else {
-                frame.stack.push_back(makeRuntimeString(context, stringifyValue(context, lhs) + stringifyValue(context, rhs)));
+                frame.stack.push_back(makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs)));
             }
             break;
         }
@@ -318,22 +428,6 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
         case OpCode::CallHost: {
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
             const auto& name = module_->strings.at(ins.a);
-            if (name == "print") {
-                if (!args.empty()) {
-                    std::cout << "[script] " << stringifyValue(context, args[0]) << '\n';
-                } else {
-                    std::cout << "[script]" << '\n';
-                }
-                frame.stack.push_back(Value::Int(0));
-                break;
-            }
-            if (name == "str") {
-                if (args.size() != 1) {
-                    throw std::runtime_error("str() requires exactly one argument");
-                }
-                frame.stack.push_back(makeRuntimeString(context, stringifyValue(context, args[0])));
-                break;
-            }
             VmHostContext hostContext(context);
             frame.stack.push_back(hosts_.invoke(name, hostContext, args));
             break;
@@ -352,14 +446,15 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             if (classIdx >= module_->classes.size()) {
                 throw std::runtime_error("Class index out of range");
             }
-            const std::int64_t id = context.nextObjectId++;
-            context.objectHeap.emplace(id, std::make_unique<ScriptInstanceObject>(instanceType_, classIdx));
-            auto* instance = dynamic_cast<ScriptInstanceObject*>(context.objectHeap.at(id).get());
+            const std::string& className = module_->classes[classIdx].name;
+            const Value instanceRef = emplaceObject(context,
+                                                    std::make_unique<ScriptInstanceObject>(instanceType_, classIdx, className));
+            auto* instance = dynamic_cast<ScriptInstanceObject*>(&getObject(context, instanceRef));
             if (!instance) {
                 throw std::runtime_error("Failed to create script instance");
             }
             initializeInstanceAttributes(*module_, classIdx, *instance);
-            frame.stack.push_back(Value::Ref(id));
+            frame.stack.push_back(instanceRef);
             break;
         }
         case OpCode::LoadAttr: {
@@ -398,6 +493,13 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             Object& object = getObject(context, selfRef);
             const auto& methodName = module_->strings.at(ins.a);
 
+            const auto makeString = [&](const std::string& text) {
+                return makeRuntimeString(context, text);
+            };
+            const auto valueStr = [&](const Value& nested) {
+                return __str__Value(context, nested);
+            };
+
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 auto fieldIt = instance->fields().find(methodName);
                 if (fieldIt != instance->fields().end()) {
@@ -424,16 +526,30 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                     break;
                 }
 
-                std::vector<Value> methodArgs;
-                methodArgs.reserve(args.size() + 1);
-                methodArgs.push_back(selfRef);
-                methodArgs.insert(methodArgs.end(), args.begin(), args.end());
-                pushCallFrame(context,
-                              *module_,
-                              findClassMethod(instance->classIndex(), methodName),
-                              methodArgs);
+                std::size_t classMethodIndex = 0;
+                if (tryFindClassMethod(instance->classIndex(), methodName, classMethodIndex)) {
+                    std::vector<Value> methodArgs;
+                    methodArgs.reserve(args.size() + 1);
+                    methodArgs.push_back(selfRef);
+                    methodArgs.insert(methodArgs.end(), args.begin(), args.end());
+                    pushCallFrame(context,
+                                  *module_,
+                                  classMethodIndex,
+                                  methodArgs);
+                    break;
+                }
+
+                frame.stack.push_back(object.getType().callMethod(object,
+                                                                  methodName,
+                                                                  args,
+                                                                  makeString,
+                                                                  valueStr));
             } else {
-                frame.stack.push_back(object.getType().callMethod(object, methodName, args));
+                frame.stack.push_back(object.getType().callMethod(object,
+                                                                  methodName,
+                                                                  args,
+                                                                  makeString,
+                                                                  valueStr));
             }
             break;
         }
@@ -479,9 +595,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
         case OpCode::MakeList: {
             const std::size_t count = static_cast<std::size_t>(ins.a);
             const auto elements = collectArgs(frame.stack, count);
-            const std::int64_t id = context.nextObjectId++;
-            context.objectHeap.emplace(id, std::make_unique<ListObject>(listType_, elements));
-            frame.stack.push_back(Value::Ref(id));
+            frame.stack.push_back(emplaceObject(context, std::make_unique<ListObject>(listType_, elements)));
             break;
         }
         case OpCode::MakeDict: {
@@ -495,9 +609,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                 const Value key = popValue(frame.stack);
                 values[key.asInt()] = value;
             }
-            const std::int64_t id = context.nextObjectId++;
-            context.objectHeap.emplace(id, std::make_unique<DictObject>(dictType_, std::move(values)));
-            frame.stack.push_back(Value::Ref(id));
+            frame.stack.push_back(emplaceObject(context, std::make_unique<DictObject>(dictType_, std::move(values))));
             break;
         }
         case OpCode::Sleep:

@@ -1,7 +1,7 @@
-fn worker(v) {
-    sleep 10;
-    return v * 2;
-}
+# fn worker(v) {
+#     sleep 10;
+#     return v * 2;
+# }
 
 fn animalVoice(self) {
     print("animal");
@@ -58,19 +58,6 @@ fn loop_demo() {
     }
 
     let dict = {1: 100, 2: 200};
-    for (k, v in dict) {
-        print(k);
-        print(v);
-    }
-
-    let state = 2;
-    if (state == 1) {
-        print(111);
-    } elif (state == 2) {
-        print(222);
-    } else {
-        print(333);
-    }
 
     let i = 0;
     while (i < 10) {
@@ -100,11 +87,14 @@ fn main() {
 
     let dict = {};
     dict.set(1, base);
+    print("dict1", dict);
     let oldValue = dict.get(1);
     print(oldValue);
     dict.set(1, oldValue + 1);
     let removedDict = dict.del(1);
-    print(removedDict);
+    
+
+    print ("dict", dict);
 
     let list = [];
     list.push(10);
@@ -115,11 +105,17 @@ fn main() {
     let removedList = list.remove(1);
     print(removedList);
 
-    let task = spawn worker(base);
-    let result = await task;
+    # let task = spawn worker(base);
+    # let result = await task;
 
     let animal = Animal();
     let dog = Dog();
+    print("type(animal)", type(animal));
+    print("type(dog)", type(dog));
+    print(str(animal));
+    print(animal.__str__());
+    print(str(dog));
+    print(dog.__str__());
 
     dog.VoiceFn = animalVoice;
 
@@ -129,24 +125,33 @@ fn main() {
     print("dog.speak", dog.speak());
     print("dog.VoiceFn", dog.VoiceFn());
 
-    let p = Vec2();
+    let p = Vec2(9, 8);
+    
+    print(str(p));
+    print(p.__str__());
     print(p.x);
-    p.x = 10.0;
-    p.y = 20.0;
-    print(p.x);
-    print(p.y);
+    p.y = 23.0;
+    print("p", p);
+    print("px, py", p.x, p.y);
+
+    let s = "dsjfkdfj";
+    print ("str", s);
 
     let e = Entity();
-    print(e.hp);
-    e.hp = 135;
-    e.mp = 88;
-    e.speed = 9.0;
-    e.x = p.x;
-    e.y = p.y;
-    print(e.hp);
-    print(e.x);
-    print(e.y);
+    print(type(e));
+    print(str(e));
+    print(e.__str__());
+    print(e.HP);
+    e.HP = 135;
+    e.MP = 88;
+    e.GotoPoint(p);
+    e.Speed = 9.0;
+    e.Position = p;
+    print(e.HP);
+    print ("id(e)", type(id(e)));
 
-    print(result);
-    return result;
+    
+
+    #print(result);
+    #return result;
 }
