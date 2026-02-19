@@ -1,0 +1,46 @@
+{
+  "name": "gs-script-tools",
+  "displayName": "GS Script Tools",
+  "description": "Syntax highlighting and comment helpers for GameScript (.gs)",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:gs",
+    "onCommand:gs.addLineComment"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "gs",
+        "aliases": [
+          "GameScript",
+          "gs"
+        ],
+        "extensions": [
+          ".gs"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "gs",
+        "scopeName": "source.gs",
+        "path": "./syntaxes/gs.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "gs.addLineComment",
+        "title": "GS: Add Line Comment"
+      }
+    ]
+  }
+}
