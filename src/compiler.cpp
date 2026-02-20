@@ -2,14 +2,332 @@
 
 #include "gs/tokenizer.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace gs {
 
 namespace {
+
+std::string trimCopy(const std::string& value) {
+    std::size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+        ++start;
+    }
+    std::size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return value.substr(start, end - start);
+}
+
+std::string readFileText(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+}
+
+std::vector<std::string> splitLines(const std::string& source) {
+    std::vector<std::string> lines;
+    std::istringstream input(source);
+    std::string line;
+    while (std::getline(input, line)) {
+        lines.push_back(line);
+    }
+    if (!source.empty() && source.back() == '\n') {
+        lines.push_back("");
+    }
+    return lines;
+}
+
+std::string normalizeModuleSpecToPath(const std::string& moduleSpec) {
+    std::string candidate = moduleSpec;
+    if (candidate.find('/') == std::string::npos && candidate.find('\\') == std::string::npos) {
+        for (char& c : candidate) {
+            if (c == '.') {
+                c = '/';
+            }
+        }
+    }
+    return candidate;
+}
+
+std::string resolveImportPath(const std::string& moduleSpec,
+                              const std::string& currentFile,
+                              const std::vector<std::string>& searchPaths) {
+    namespace fs = std::filesystem;
+
+    std::vector<std::string> candidates;
+    const std::string normalized = normalizeModuleSpecToPath(moduleSpec);
+    candidates.push_back(normalized);
+    if (normalized.size() < 3 || normalized.substr(normalized.size() - 3) != ".gs") {
+        candidates.push_back(normalized + ".gs");
+    }
+
+    const fs::path currentDir = fs::path(currentFile).parent_path();
+    for (const auto& candidate : candidates) {
+        fs::path pathCandidate(candidate);
+        if (pathCandidate.is_absolute() && fs::exists(pathCandidate)) {
+            return fs::weakly_canonical(pathCandidate).string();
+        }
+
+        fs::path local = currentDir / pathCandidate;
+        if (fs::exists(local)) {
+            return fs::weakly_canonical(local).string();
+        }
+
+        for (const auto& base : searchPaths) {
+            fs::path searchCandidate = fs::path(base) / pathCandidate;
+            if (fs::exists(searchCandidate)) {
+                return fs::weakly_canonical(searchCandidate).string();
+            }
+        }
+    }
+
+    return {};
+}
+
+std::string replaceAllRegex(const std::string& input,
+                            const std::string& pattern,
+                            const std::string& replacement) {
+    return std::regex_replace(input, std::regex(pattern), replacement);
+}
+
+struct ImportStatement {
+    std::string moduleSpec;
+    std::string importName;
+    std::string alias;
+    bool valid{false};
+    bool isFrom{false};
+    bool isWildcard{false};
+};
+
+struct ModuleAliasBinding {
+    std::string alias;
+    std::string moduleSpec;
+    std::vector<std::string> exports;
+};
+
+struct ProcessedModule {
+    std::string source;
+    std::vector<std::string> exports;
+};
+
+std::string defaultModuleAlias(const std::string& moduleSpec) {
+    const std::size_t slash = moduleSpec.find_last_of("/\\");
+    const std::size_t dot = moduleSpec.find_last_of('.');
+    std::size_t split = std::string::npos;
+    if (slash != std::string::npos && dot != std::string::npos) {
+        split = std::max(slash, dot);
+    } else if (slash != std::string::npos) {
+        split = slash;
+    } else if (dot != std::string::npos) {
+        split = dot;
+    }
+    if (split == std::string::npos || split + 1 >= moduleSpec.size()) {
+        return moduleSpec;
+    }
+    return moduleSpec.substr(split + 1);
+}
+
+void appendUnique(std::vector<std::string>& target, const std::string& value) {
+    for (const auto& existing : target) {
+        if (existing == value) {
+            return;
+        }
+    }
+    target.push_back(value);
+}
+
+std::vector<std::string> extractExportsFromSource(const std::string& source) {
+    std::vector<std::string> exports;
+    static const std::regex fnRe(R"(^\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\()");
+    static const std::regex classRe(R"(^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b)");
+
+    for (const auto& line : splitLines(source)) {
+        std::smatch m;
+        if (std::regex_search(line, m, fnRe)) {
+            appendUnique(exports, m[1].str());
+        }
+        if (std::regex_search(line, m, classRe)) {
+            appendUnique(exports, m[1].str());
+        }
+    }
+    return exports;
+}
+
+std::string buildModuleAliasInitBlock(const ModuleAliasBinding& binding) {
+    std::ostringstream out;
+    out << "let " << binding.alias << " = Module(\"" << binding.moduleSpec << "\");\n";
+    for (const auto& symbol : binding.exports) {
+        out << binding.alias << "." << symbol << " = " << symbol << ";\n";
+    }
+    return out.str();
+}
+
+std::string makeInternalAlias(const std::string& moduleSpec, std::size_t index) {
+    std::string out = "__m" + std::to_string(index) + "_";
+    for (char c : moduleSpec) {
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    return out;
+}
+
+std::string injectIntoFunctionBodies(const std::string& source, const std::string& injectionBlock) {
+    if (injectionBlock.empty()) {
+        return source;
+    }
+
+    static const std::regex fnHeaderRe(R"((^\s*fn\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*\{))");
+    std::ostringstream out;
+    for (const auto& line : splitLines(source)) {
+        out << line << '\n';
+        if (std::regex_search(line, fnHeaderRe)) {
+            out << injectionBlock;
+        }
+    }
+    return out.str();
+}
+
+ImportStatement parseImportLine(const std::string& rawLine) {
+    ImportStatement stmt;
+    std::string line = trimCopy(rawLine);
+    if (line.empty()) {
+        return stmt;
+    }
+    if (line.rfind("#", 0) == 0 || line.rfind("//", 0) == 0) {
+        return stmt;
+    }
+    if (!line.empty() && line.back() == ';') {
+        line.pop_back();
+        line = trimCopy(line);
+    }
+
+    std::smatch match;
+    static const std::regex importRe(R"(^import\s+([A-Za-z_][A-Za-z0-9_./]*)\s*(?:as\s+([A-Za-z_][A-Za-z0-9_]*))?$)");
+    static const std::regex fromRe(R"(^from\s+([A-Za-z_][A-Za-z0-9_./]*)\s+import\s+(\*|[A-Za-z_][A-Za-z0-9_]*)\s*(?:as\s+([A-Za-z_][A-Za-z0-9_]*))?$)");
+
+    if (std::regex_match(line, match, importRe)) {
+        stmt.valid = true;
+        stmt.isFrom = false;
+        stmt.moduleSpec = match[1].str();
+        if (match.size() > 2) {
+            stmt.alias = match[2].str();
+        }
+        stmt.isWildcard = true;
+        return stmt;
+    }
+
+    if (std::regex_match(line, match, fromRe)) {
+        stmt.valid = true;
+        stmt.isFrom = true;
+        stmt.moduleSpec = match[1].str();
+        stmt.importName = match[2].str();
+        stmt.isWildcard = stmt.importName == "*";
+        if (match.size() > 3) {
+            stmt.alias = match[3].str();
+        }
+        return stmt;
+    }
+
+    return stmt;
+}
+
+ProcessedModule preprocessImportsRecursive(const std::string& filePath,
+                                           const std::vector<std::string>& searchPaths,
+                                           std::unordered_map<std::string, ProcessedModule>& cache,
+                                           std::unordered_set<std::string>& visiting) {
+    const std::string canonical = std::filesystem::weakly_canonical(filePath).string();
+    auto cached = cache.find(canonical);
+    if (cached != cache.end()) {
+        return cached->second;
+    }
+    if (visiting.contains(canonical)) {
+        throw std::runtime_error("Cyclic import detected: " + canonical);
+    }
+
+    const std::string source = readFileText(canonical);
+    if (source.empty()) {
+        throw std::runtime_error("Failed to read script file: " + canonical);
+    }
+
+    visiting.insert(canonical);
+
+    std::ostringstream bodySource;
+    std::vector<std::pair<std::string, std::string>> symbolAliases;
+    std::vector<ModuleAliasBinding> moduleAliases;
+    std::size_t internalAliasIndex = 0;
+
+    const auto lines = splitLines(source);
+    for (const auto& line : lines) {
+        ImportStatement stmt = parseImportLine(line);
+        if (!stmt.valid) {
+            bodySource << line << '\n';
+            continue;
+        }
+
+        const std::string resolvedImport = resolveImportPath(stmt.moduleSpec, canonical, searchPaths);
+        if (resolvedImport.empty()) {
+            throw std::runtime_error("Cannot resolve import '" + stmt.moduleSpec + "' from " + canonical);
+        }
+
+        const auto imported = preprocessImportsRecursive(resolvedImport, searchPaths, cache, visiting);
+
+        if (!stmt.isFrom) {
+            const std::string alias = stmt.alias.empty() ? defaultModuleAlias(stmt.moduleSpec) : stmt.alias;
+            moduleAliases.push_back({alias, stmt.moduleSpec, {}});
+            continue;
+        }
+
+        if (stmt.isWildcard) {
+            if (stmt.alias.empty()) {
+                throw std::runtime_error("from " + stmt.moduleSpec + " import * requires alias in strict module mode");
+            }
+            moduleAliases.push_back({stmt.alias, stmt.moduleSpec, {}});
+            continue;
+        }
+
+        const std::string alias = stmt.alias.empty() ? stmt.importName : stmt.alias;
+        const std::string internalModuleAlias = makeInternalAlias(stmt.moduleSpec, internalAliasIndex++);
+        moduleAliases.push_back({internalModuleAlias, stmt.moduleSpec, {}});
+        symbolAliases.push_back({alias, internalModuleAlias + "." + stmt.importName});
+    }
+
+    std::string body = bodySource.str();
+    for (const auto& [alias, symbolExpr] : symbolAliases) {
+        std::ostringstream block;
+        block << "let " << alias << " = " << symbolExpr << ";\n";
+        body = injectIntoFunctionBodies(body, block.str());
+    }
+
+    std::ostringstream injectBlock;
+    for (const auto& moduleAlias : moduleAliases) {
+        injectBlock << buildModuleAliasInitBlock(moduleAlias);
+    }
+    body = injectIntoFunctionBodies(body, injectBlock.str());
+
+    visiting.erase(canonical);
+
+    ProcessedModule processed;
+    processed.source = body;
+    processed.exports = extractExportsFromSource(body);
+    cache.emplace(canonical, processed);
+    return processed;
+}
 
 struct LoopContext {
     std::vector<std::size_t> breakJumps;
@@ -43,6 +361,28 @@ Value evalClassFieldInit(const Expr& expr,
     }
 
     throw std::runtime_error("Class field initializer must be number/string/function name");
+}
+
+Value evalGlobalInit(const Expr& expr,
+                    Module& module,
+                    const std::unordered_map<std::string, std::size_t>& funcIndex) {
+    switch (expr.type) {
+    case ExprType::Number:
+        return expr.value;
+    case ExprType::StringLiteral:
+        return Value::String(addString(module, expr.stringLiteral));
+    case ExprType::Variable: {
+        auto it = funcIndex.find(expr.name);
+        if (it != funcIndex.end()) {
+            return Value::Function(static_cast<std::int64_t>(it->second));
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    throw std::runtime_error("Top-level let initializer must be number/string/function name");
 }
 
 std::int32_t addConstant(Module& module, Value value) {
@@ -107,6 +447,16 @@ void compileExpr(const Expr& expr,
         if (it != locals.end()) {
             emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(it->second), 0);
             return;
+        }
+
+        for (const auto& global : module.globals) {
+            if (global.name == expr.name) {
+                emit(code,
+                     OpCode::PushConst,
+                     addConstant(module, global.initialValue),
+                     0);
+                return;
+            }
         }
 
         auto fit = funcIndex.find(expr.name);
@@ -524,6 +874,20 @@ Module Compiler::compile(const Program& program) {
         module.classes.push_back(std::move(classBc));
     }
 
+    for (const auto& stmt : program.topLevelLets) {
+        bool exists = false;
+        for (const auto& g : module.globals) {
+            if (g.name == stmt.name) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) {
+            throw std::runtime_error("Duplicate top-level variable name: " + stmt.name);
+        }
+        module.globals.push_back({stmt.name, evalGlobalInit(stmt.expr, module, funcIndex)});
+    }
+
     for (const auto& fn : program.functions) {
         if (funcIndex.contains(fn.name)) {
             throw std::runtime_error("Duplicate function name: " + fn.name);
@@ -551,7 +915,15 @@ Module Compiler::compile(const Program& program) {
             classBc.attributes.push_back({attr.name, evalClassFieldInit(attr.initializer, module, funcIndex)});
         }
 
+        bool hasCtor = false;
         for (const auto& method : cls.methods) {
+            if (method.name == "__new__") {
+                hasCtor = true;
+                if (method.params.empty()) {
+                    throw std::runtime_error("Class constructor __new__ must declare self parameter: " + cls.name);
+                }
+            }
+
             const std::string mangled = mangleMethodName(cls.name, method.name);
             if (funcIndex.contains(mangled)) {
                 throw std::runtime_error("Duplicate method: " + mangled);
@@ -564,6 +936,10 @@ Module Compiler::compile(const Program& program) {
             funcIndex[mangled] = idx;
             module.functions.push_back(std::move(compiled));
             classBc.methods.push_back({method.name, idx});
+        }
+
+        if (!hasCtor) {
+            throw std::runtime_error("Class must define constructor __new__: " + cls.name);
         }
     }
 
@@ -610,6 +986,14 @@ Module compileSource(const std::string& source) {
     return compiler.compile(parser.parseProgram());
 }
 
+Module compileSourceFile(const std::string& path, const std::vector<std::string>& searchPaths) {
+    std::unordered_map<std::string, ProcessedModule> cache;
+    std::unordered_set<std::string> visiting;
+    const auto processed = preprocessImportsRecursive(path, searchPaths, cache, visiting);
+    const std::string& mergedSource = processed.source;
+    return compileSource(mergedSource);
+}
+
 std::string serializeModuleText(const Module& module) {
     std::ostringstream out;
     out << "GSBC1\n";
@@ -650,6 +1034,12 @@ std::string serializeModuleText(const Module& module) {
         for (const auto& method : cls.methods) {
             out << std::quoted(method.name) << " " << method.functionIndex << "\n";
         }
+    }
+
+    out << module.globals.size() << "\n";
+    for (const auto& global : module.globals) {
+        out << std::quoted(global.name) << " " << static_cast<int>(global.initialValue.type)
+            << " " << global.initialValue.payload << "\n";
     }
 
     return out.str();
@@ -739,6 +1129,15 @@ Module deserializeModuleText(const std::string& text) {
         }
 
         module.classes.push_back(std::move(cls));
+    }
+
+    in >> count;
+    for (std::size_t i = 0; i < count; ++i) {
+        GlobalBinding global;
+        int type = 0;
+        in >> std::quoted(global.name) >> type >> global.initialValue.payload;
+        global.initialValue.type = static_cast<ValueType>(type);
+        module.globals.push_back(std::move(global));
     }
 
     return module;
@@ -857,6 +1256,29 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
         }
         out << "        m.classes.push_back(std::move(c));\n";
         out << "    }\n";
+    }
+
+    for (const auto& global : module.globals) {
+        out << "    m.globals.push_back(gs::GlobalBinding{" << std::quoted(global.name)
+            << ", gs::Value{gs::ValueType::";
+        switch (global.initialValue.type) {
+        case ValueType::Nil:
+            out << "Nil";
+            break;
+        case ValueType::Int:
+            out << "Int";
+            break;
+        case ValueType::String:
+            out << "String";
+            break;
+        case ValueType::Ref:
+            out << "Ref";
+            break;
+        case ValueType::Function:
+            out << "Function";
+            break;
+        }
+        out << ", " << global.initialValue.payload << "}});\n";
     }
 
     out << "    return m;\n";

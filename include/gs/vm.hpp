@@ -21,6 +21,9 @@ enum class RunState {
 struct Frame {
     std::size_t functionIndex{0};
     std::size_t ip{0};
+    std::shared_ptr<const Module> modulePin;
+    bool replaceReturnWithInstance{false};
+    Value constructorInstance{Value::Nil()};
     std::vector<Value> locals;
     std::vector<Value> stack;
 };
@@ -30,6 +33,7 @@ struct ExecutionContext {
     RunState state{RunState::Running};
     std::chrono::steady_clock::time_point wakeTime{};
     Value returnValue{Value::Nil()};
+    bool deleteHooksRan{false};
     std::shared_ptr<const Module> modulePin;
     std::vector<std::string> stringPool;
     std::unordered_map<std::uint64_t, std::unique_ptr<Object>> objectHeap;
@@ -48,10 +52,12 @@ public:
 private:
     std::size_t findFunctionIndex(const std::string& name) const;
     static void pushCallFrame(ExecutionContext& ctx,
-                              const Module& module,
+                              std::shared_ptr<const Module> modulePin,
                               std::size_t functionIndex,
-                              const std::vector<Value>& args);
-    bool tryFindClassMethod(std::size_t classIndex, const std::string& methodName, std::size_t& outFunctionIndex) const;
+                              const std::vector<Value>& args,
+                              bool replaceReturnWithInstance = false,
+                              Value constructorInstance = Value::Nil());
+    void runDeleteHooks(ExecutionContext& context);
 
     Object& getObject(ExecutionContext& context, const Value& ref);
 
@@ -61,6 +67,7 @@ private:
     ListType listType_;
     DictType dictType_;
     FunctionType functionType_;
+    ClassType classType_;
     ScriptInstanceType instanceType_;
 };
 

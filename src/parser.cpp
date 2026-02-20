@@ -19,8 +19,16 @@ Program Parser::parseProgram() {
     while (!isAtEnd()) {
         if (check(TokenType::KeywordClass)) {
             program.classes.push_back(parseClass());
-        } else {
+        } else if (check(TokenType::KeywordFn)) {
             program.functions.push_back(parseFunction());
+        } else if (check(TokenType::KeywordLet)) {
+            Stmt stmt = parseStatement();
+            if (stmt.type != StmtType::LetExpr) {
+                throw std::runtime_error("Top-level let only supports direct expression assignment");
+            }
+            program.topLevelLets.push_back(std::move(stmt));
+        } else {
+            throw std::runtime_error("Top-level statement must be class, fn, or let");
         }
     }
     return program;

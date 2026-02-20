@@ -204,8 +204,11 @@ private:
     ExecutionContext& context_;
 };
 
-Value makeFunctionObject(ExecutionContext& context, FunctionType& functionType, std::size_t functionIndex) {
-    return emplaceObject(context, std::make_unique<FunctionObject>(functionType, functionIndex));
+Value makeFunctionObject(ExecutionContext& context,
+                         FunctionType& functionType,
+                         std::size_t functionIndex,
+                         std::shared_ptr<const Module> modulePin = nullptr) {
+    return emplaceObject(context, std::make_unique<FunctionObject>(functionType, functionIndex, std::move(modulePin)));
 }
 
 Value normalizeFunctionValue(ExecutionContext& context,
@@ -214,10 +217,104 @@ Value normalizeFunctionValue(ExecutionContext& context,
     if (!value.isFunction()) {
         return value;
     }
-    return makeFunctionObject(context, functionType, static_cast<std::size_t>(value.asFunctionIndex()));
+    return makeFunctionObject(context,
+                              functionType,
+                              static_cast<std::size_t>(value.asFunctionIndex()),
+                              context.modulePin);
+}
+
+Value normalizeModuleValue(ExecutionContext& context,
+                           FunctionType& functionType,
+                           const std::shared_ptr<const Module>& modulePin,
+                           const Value& value) {
+    if (value.isFunction()) {
+        return makeFunctionObject(context,
+                                  functionType,
+                                  static_cast<std::size_t>(value.asFunctionIndex()),
+                                  modulePin);
+    }
+
+    if (value.isString() && modulePin) {
+        const auto stringIndex = static_cast<std::size_t>(value.asStringIndex());
+        if (stringIndex >= modulePin->strings.size()) {
+            throw std::runtime_error("String index out of range");
+        }
+        return makeRuntimeString(context, modulePin->strings[stringIndex]);
+    }
+
+    return value;
+}
+
+Object& getObjectFromHeap(ExecutionContext& context, const Value& ref) {
+    if (!ref.isRef()) {
+        throw std::runtime_error("Method target is not an object reference");
+    }
+    auto it = context.objectHeap.find(toObjectId(ref));
+    if (it == context.objectHeap.end() || !it->second) {
+        throw std::runtime_error("Object reference not found");
+    }
+    return *(it->second);
 }
 
 void initializeInstanceAttributes(const Module& module,
+                                  ExecutionContext& context,
+                                  FunctionType& functionType,
+                                  const std::shared_ptr<const Module>& modulePin,
+                                  std::size_t classIndex,
+                                  ScriptInstanceObject& instance);
+
+Value makeScriptInstance(ExecutionContext& context,
+                         FunctionType& functionType,
+                         ScriptInstanceType& instanceType,
+                         const Module& module,
+                         std::shared_ptr<const Module> modulePin,
+                         std::size_t classIndex) {
+    if (classIndex >= module.classes.size()) {
+        throw std::runtime_error("Class index out of range");
+    }
+
+    const std::string& className = module.classes[classIndex].name;
+    const auto instanceModulePin = modulePin;
+    const Value instanceRef = emplaceObject(context,
+                                            std::make_unique<ScriptInstanceObject>(instanceType,
+                                                                                   classIndex,
+                                                                                   className,
+                                                                                   instanceModulePin));
+    auto* instance = dynamic_cast<ScriptInstanceObject*>(&getObjectFromHeap(context, instanceRef));
+    if (!instance) {
+        throw std::runtime_error("Failed to create script instance");
+    }
+    initializeInstanceAttributes(module,
+                                 context,
+                                 functionType,
+                                 instanceModulePin,
+                                 classIndex,
+                                 *instance);
+    return instanceRef;
+}
+
+bool tryFindClassMethodInModule(const Module& module,
+                                std::size_t classIndex,
+                                const std::string& methodName,
+                                std::size_t& outFunctionIndex) {
+    std::int32_t index = static_cast<std::int32_t>(classIndex);
+    while (index >= 0) {
+        const auto& cls = module.classes.at(static_cast<std::size_t>(index));
+        for (const auto& method : cls.methods) {
+            if (method.name == methodName) {
+                outFunctionIndex = method.functionIndex;
+                return true;
+            }
+        }
+        index = cls.baseClassIndex;
+    }
+    return false;
+}
+
+void initializeInstanceAttributes(const Module& module,
+                                  ExecutionContext& context,
+                                  FunctionType& functionType,
+                                  const std::shared_ptr<const Module>& modulePin,
                                   std::size_t classIndex,
                                   ScriptInstanceObject& instance) {
     if (classIndex >= module.classes.size()) {
@@ -226,11 +323,19 @@ void initializeInstanceAttributes(const Module& module,
 
     const auto& cls = module.classes[classIndex];
     if (cls.baseClassIndex >= 0) {
-        initializeInstanceAttributes(module, static_cast<std::size_t>(cls.baseClassIndex), instance);
+        initializeInstanceAttributes(module,
+                                     context,
+                                     functionType,
+                                     modulePin,
+                                     static_cast<std::size_t>(cls.baseClassIndex),
+                                     instance);
     }
 
     for (const auto& attr : cls.attributes) {
-        instance.fields()[attr.name] = attr.defaultValue;
+        instance.fields()[attr.name] = normalizeModuleValue(context,
+                                                            functionType,
+                                                            modulePin,
+                                                            attr.defaultValue);
     }
 }
 
@@ -254,28 +359,17 @@ std::size_t VirtualMachine::findFunctionIndex(const std::string& name) const {
     throw std::runtime_error("Script function not found: " + name);
 }
 
-bool VirtualMachine::tryFindClassMethod(std::size_t classIndex,
-                                        const std::string& methodName,
-                                        std::size_t& outFunctionIndex) const {
-    std::int32_t index = static_cast<std::int32_t>(classIndex);
-    while (index >= 0) {
-        const auto& cls = module_->classes.at(static_cast<std::size_t>(index));
-        for (const auto& method : cls.methods) {
-            if (method.name == methodName) {
-                outFunctionIndex = method.functionIndex;
-                return true;
-            }
-        }
-        index = cls.baseClassIndex;
-    }
-    return false;
-}
-
 void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
-                                   const Module& module,
+                                   std::shared_ptr<const Module> modulePin,
                                    std::size_t functionIndex,
-                                   const std::vector<Value>& args) {
-    const auto& fn = module.functions.at(functionIndex);
+                                   const std::vector<Value>& args,
+                                   bool replaceReturnWithInstance,
+                                   Value constructorInstance) {
+    if (!modulePin) {
+        throw std::runtime_error("Call frame module is null");
+    }
+
+    const auto& fn = modulePin->functions.at(functionIndex);
     if (args.size() != fn.params.size()) {
         throw std::runtime_error("Function argument count mismatch: " + fn.name);
     }
@@ -283,6 +377,9 @@ void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
     Frame frame;
     frame.functionIndex = functionIndex;
     frame.ip = 0;
+    frame.modulePin = std::move(modulePin);
+    frame.replaceReturnWithInstance = replaceReturnWithInstance;
+    frame.constructorInstance = constructorInstance;
     frame.locals.assign(fn.localCount, Value::Nil());
     for (std::size_t i = 0; i < args.size(); ++i) {
         frame.locals[i] = args[i];
@@ -306,7 +403,7 @@ ExecutionContext VirtualMachine::beginCoroutine(const std::string& functionName,
     ExecutionContext context;
     context.modulePin = module_;
     context.stringPool = module_->strings;
-    pushCallFrame(context, *module_, findFunctionIndex(functionName), args);
+    pushCallFrame(context, module_, findFunctionIndex(functionName), args);
     context.state = RunState::Running;
     return context;
 }
@@ -330,7 +427,12 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
         }
 
         auto& frame = context.frames.back();
-        const auto& fn = module_->functions.at(frame.functionIndex);
+        if (!frame.modulePin) {
+            throw std::runtime_error("Frame module is null");
+        }
+        const auto frameModule = frame.modulePin;
+        const auto& fn = frameModule->functions.at(frame.functionIndex);
+        context.modulePin = frameModule;
         if (frame.ip >= fn.code.size()) {
             throw std::runtime_error("Instruction pointer out of range");
         }
@@ -338,8 +440,10 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
         const Instruction ins = fn.code[frame.ip++];
         switch (ins.op) {
         case OpCode::PushConst: {
-            Value value = module_->constants.at(ins.a);
-            value = normalizeFunctionValue(context, functionType_, value);
+            Value value = normalizeModuleValue(context,
+                                               functionType_,
+                                               frameModule,
+                                               frameModule->constants.at(ins.a));
             frame.stack.push_back(value);
             break;
         }
@@ -427,40 +531,47 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
         }
         case OpCode::CallHost: {
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
-            const auto& name = module_->strings.at(ins.a);
+            const auto& name = frameModule->strings.at(ins.a);
             VmHostContext hostContext(context);
             frame.stack.push_back(hosts_.invoke(name, hostContext, args));
             break;
         }
         case OpCode::CallFunc: {
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
-            pushCallFrame(context, *module_, static_cast<std::size_t>(ins.a), args);
+            pushCallFrame(context, frameModule, static_cast<std::size_t>(ins.a), args);
             break;
         }
         case OpCode::NewInstance: {
             const auto ctorArgs = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
-            if (!ctorArgs.empty()) {
-                throw std::runtime_error("Class constructor arguments are not supported yet");
+            const std::size_t classIndex = static_cast<std::size_t>(ins.a);
+            const Value instanceRef = makeScriptInstance(context,
+                                                         functionType_,
+                                                         instanceType_,
+                                                         *frameModule,
+                                                         frameModule,
+                                                         classIndex);
+
+            std::size_t ctorFunctionIndex = 0;
+            if (!tryFindClassMethodInModule(*frameModule, classIndex, "__new__", ctorFunctionIndex)) {
+                throw std::runtime_error("Class is missing required constructor __new__: " + frameModule->classes.at(classIndex).name);
             }
-            const std::size_t classIdx = static_cast<std::size_t>(ins.a);
-            if (classIdx >= module_->classes.size()) {
-                throw std::runtime_error("Class index out of range");
-            }
-            const std::string& className = module_->classes[classIdx].name;
-            const Value instanceRef = emplaceObject(context,
-                                                    std::make_unique<ScriptInstanceObject>(instanceType_, classIdx, className));
-            auto* instance = dynamic_cast<ScriptInstanceObject*>(&getObject(context, instanceRef));
-            if (!instance) {
-                throw std::runtime_error("Failed to create script instance");
-            }
-            initializeInstanceAttributes(*module_, classIdx, *instance);
-            frame.stack.push_back(instanceRef);
+
+            std::vector<Value> ctorInvokeArgs;
+            ctorInvokeArgs.reserve(ctorArgs.size() + 1);
+            ctorInvokeArgs.push_back(instanceRef);
+            ctorInvokeArgs.insert(ctorInvokeArgs.end(), ctorArgs.begin(), ctorArgs.end());
+            pushCallFrame(context,
+                          frameModule,
+                          ctorFunctionIndex,
+                          ctorInvokeArgs,
+                          true,
+                          instanceRef);
             break;
         }
         case OpCode::LoadAttr: {
             const Value selfRef = popValue(frame.stack);
             Object& object = getObject(context, selfRef);
-            const auto& attrName = module_->strings.at(ins.a);
+            const auto& attrName = frameModule->strings.at(ins.a);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 auto it = instance->fields().find(attrName);
                 if (it == instance->fields().end()) {
@@ -468,16 +579,64 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                 }
                 it->second = normalizeFunctionValue(context, functionType_, it->second);
                 frame.stack.push_back(it->second);
+            } else if (auto* moduleObj = dynamic_cast<ModuleObject*>(&object)) {
+                auto exportIt = moduleObj->exports().find(attrName);
+                if (exportIt != moduleObj->exports().end()) {
+                    frame.stack.push_back(exportIt->second);
+                    break;
+                }
+
+                const auto& modulePin = moduleObj->modulePin();
+                if (modulePin) {
+                    for (const auto& global : modulePin->globals) {
+                        if (global.name == attrName) {
+                            Value globalValue = normalizeModuleValue(context,
+                                                                     functionType_,
+                                                                     modulePin,
+                                                                     global.initialValue);
+                            moduleObj->exports()[attrName] = globalValue;
+                            frame.stack.push_back(globalValue);
+                            goto load_attr_done;
+                        }
+                    }
+
+                    for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
+                        const auto& fn = modulePin->functions[i];
+                        if (fn.name == attrName) {
+                            Value functionRef = makeFunctionObject(context, functionType_, i, modulePin);
+                            moduleObj->exports()[attrName] = functionRef;
+                            frame.stack.push_back(functionRef);
+                            goto load_attr_done;
+                        }
+                    }
+
+                    for (std::size_t i = 0; i < modulePin->classes.size(); ++i) {
+                        const auto& cls = modulePin->classes[i];
+                        if (cls.name == attrName) {
+                            Value classRef = emplaceObject(context,
+                                                           std::make_unique<ClassObject>(classType_,
+                                                                                         cls.name,
+                                                                                         i,
+                                                                                         modulePin));
+                            moduleObj->exports()[attrName] = classRef;
+                            frame.stack.push_back(classRef);
+                            goto load_attr_done;
+                        }
+                    }
+                }
+
+                frame.stack.push_back(object.getType().getMember(object, attrName));
             } else {
                 frame.stack.push_back(object.getType().getMember(object, attrName));
             }
+load_attr_done:
             break;
         }
         case OpCode::StoreAttr: {
             const Value assigned = popValue(frame.stack);
             const Value selfRef = popValue(frame.stack);
             Object& object = getObject(context, selfRef);
-            const auto& attrName = module_->strings.at(ins.a);
+            const auto& attrName = frameModule->strings.at(ins.a);
             const Value normalized = normalizeFunctionValue(context, functionType_, assigned);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 instance->fields()[attrName] = normalized;
@@ -491,7 +650,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
             const Value selfRef = popValue(frame.stack);
             Object& object = getObject(context, selfRef);
-            const auto& methodName = module_->strings.at(ins.a);
+            const auto& methodName = frameModule->strings.at(ins.a);
 
             const auto makeString = [&](const std::string& text) {
                 return makeRuntimeString(context, text);
@@ -499,6 +658,55 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             const auto valueStr = [&](const Value& nested) {
                 return __str__Value(context, nested);
             };
+
+            if (auto* moduleObj = dynamic_cast<ModuleObject*>(&object)) {
+                const auto& modulePin = moduleObj->modulePin();
+                if (!modulePin) {
+                    throw std::runtime_error("Module object is not loaded: " + moduleObj->moduleName());
+                }
+
+                for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
+                    if (modulePin->functions[i].name == methodName) {
+                        pushCallFrame(context,
+                                      modulePin,
+                                      i,
+                                      args);
+                        goto call_method_done;
+                    }
+                }
+
+                for (std::size_t i = 0; i < modulePin->classes.size(); ++i) {
+                    if (modulePin->classes[i].name != methodName) {
+                        continue;
+                    }
+
+                    const Value instanceRef = makeScriptInstance(context,
+                                                                 functionType_,
+                                                                 instanceType_,
+                                                                 *modulePin,
+                                                                 modulePin,
+                                                                 i);
+
+                    std::size_t ctorFunctionIndex = 0;
+                    if (!tryFindClassMethodInModule(*modulePin, i, "__new__", ctorFunctionIndex)) {
+                        throw std::runtime_error("Class is missing required constructor __new__: " + methodName);
+                    }
+
+                    std::vector<Value> ctorInvokeArgs;
+                    ctorInvokeArgs.reserve(args.size() + 1);
+                    ctorInvokeArgs.push_back(instanceRef);
+                    ctorInvokeArgs.insert(ctorInvokeArgs.end(), args.begin(), args.end());
+                    pushCallFrame(context,
+                                  modulePin,
+                                  ctorFunctionIndex,
+                                  ctorInvokeArgs,
+                                  true,
+                                  instanceRef);
+                    goto call_method_done;
+                }
+
+                throw std::runtime_error("Script function not found: " + methodName);
+            }
 
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 auto fieldIt = instance->fields().find(methodName);
@@ -515,25 +723,23 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                         throw std::runtime_error("Object property is not function object: " + methodName);
                     }
 
-                    std::vector<Value> methodArgs;
-                    methodArgs.reserve(args.size() + 1);
-                    methodArgs.push_back(selfRef);
-                    methodArgs.insert(methodArgs.end(), args.begin(), args.end());
+                    const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : frameModule;
                     pushCallFrame(context,
-                                  *module_,
+                                  callModule,
                                   fnObject->functionIndex(),
-                                  methodArgs);
+                                  args);
                     break;
                 }
 
                 std::size_t classMethodIndex = 0;
-                if (tryFindClassMethod(instance->classIndex(), methodName, classMethodIndex)) {
+                auto methodModule = instance->modulePin() ? instance->modulePin() : frameModule;
+                if (tryFindClassMethodInModule(*methodModule, instance->classIndex(), methodName, classMethodIndex)) {
                     std::vector<Value> methodArgs;
                     methodArgs.reserve(args.size() + 1);
                     methodArgs.push_back(selfRef);
                     methodArgs.insert(methodArgs.end(), args.begin(), args.end());
                     pushCallFrame(context,
-                                  *module_,
+                                  methodModule,
                                   classMethodIndex,
                                   methodArgs);
                     break;
@@ -551,6 +757,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                                                                   makeString,
                                                                   valueStr));
             }
+call_method_done:
             break;
         }
         case OpCode::CallValue: {
@@ -563,21 +770,56 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
 
             Object& callableObject = getObject(context, callable);
             auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject);
-            if (!fnObject) {
-                throw std::runtime_error("Attempted to call a non-function object");
+            if (fnObject) {
+                const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : frameModule;
+                pushCallFrame(context,
+                              callModule,
+                              fnObject->functionIndex(),
+                              args);
+                break;
             }
-            pushCallFrame(context,
-                          *module_,
-                          fnObject->functionIndex(),
-                          args);
-            break;
+
+            auto* classObject = dynamic_cast<ClassObject*>(&callableObject);
+            if (classObject) {
+                const auto& targetModule = classObject->modulePin();
+                if (!targetModule) {
+                    throw std::runtime_error("Class object is not bound to module: " + classObject->className());
+                }
+
+                const std::size_t classIndex = classObject->classIndex();
+                const Value instanceRef = makeScriptInstance(context,
+                                                             functionType_,
+                                                             instanceType_,
+                                                             *targetModule,
+                                                             targetModule,
+                                                             classIndex);
+
+                std::size_t ctorFunctionIndex = 0;
+                if (!tryFindClassMethodInModule(*targetModule, classIndex, "__new__", ctorFunctionIndex)) {
+                    throw std::runtime_error("Class is missing required constructor __new__: " + classObject->className());
+                }
+
+                std::vector<Value> ctorInvokeArgs;
+                ctorInvokeArgs.reserve(args.size() + 1);
+                ctorInvokeArgs.push_back(instanceRef);
+                ctorInvokeArgs.insert(ctorInvokeArgs.end(), args.begin(), args.end());
+                pushCallFrame(context,
+                              targetModule,
+                              ctorFunctionIndex,
+                              ctorInvokeArgs,
+                              true,
+                              instanceRef);
+                break;
+            }
+
+            throw std::runtime_error("Attempted to call a non-function object");
         }
         case OpCode::CallIntrinsic:
             throw std::runtime_error("CallIntrinsic is deprecated. Use Type exported methods.");
         case OpCode::SpawnFunc: {
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
-            const auto funcName = module_->functions.at(ins.a).name;
-            const auto module = module_;
+            const auto funcName = frameModule->functions.at(ins.a).name;
+            const auto module = frameModule;
             const auto* hosts = &hosts_;
             auto& tasks = tasks_;
             const std::int64_t handle = tasks_.enqueue([module, hosts, &tasks, funcName, args]() {
@@ -621,7 +863,10 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             context.wakeTime = std::chrono::steady_clock::now();
             return RunState::Suspended;
         case OpCode::Return: {
-            const Value ret = frame.stack.empty() ? Value::Nil() : popValue(frame.stack);
+            Value ret = frame.stack.empty() ? Value::Nil() : popValue(frame.stack);
+            if (frame.replaceReturnWithInstance) {
+                ret = frame.constructorInstance;
+            }
             context.frames.pop_back();
             if (context.frames.empty()) {
                 context.returnValue = ret;
@@ -645,12 +890,77 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
     while (true) {
         const auto state = resume(ctx, 1000);
         if (state == RunState::Completed) {
+            runDeleteHooks(ctx);
             return ctx.returnValue;
         }
         if (state == RunState::Suspended) {
             const auto now = std::chrono::steady_clock::now();
             if (ctx.wakeTime > now) {
                 std::this_thread::sleep_for(ctx.wakeTime - now);
+            }
+        }
+    }
+}
+
+void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
+    if (context.deleteHooksRan) {
+        return;
+    }
+    context.deleteHooksRan = true;
+
+    struct DeleteTask {
+        std::uint64_t objectId{0};
+        std::size_t classIndex{0};
+        std::shared_ptr<const Module> modulePin;
+    };
+
+    std::vector<DeleteTask> tasks;
+    tasks.reserve(context.objectHeap.size());
+    for (const auto& [objectId, objectPtr] : context.objectHeap) {
+        if (!objectPtr) {
+            continue;
+        }
+        auto* instance = dynamic_cast<ScriptInstanceObject*>(objectPtr.get());
+        if (!instance) {
+            continue;
+        }
+        auto modulePin = instance->modulePin() ? instance->modulePin() : module_;
+        if (!modulePin) {
+            continue;
+        }
+        tasks.push_back({objectId, instance->classIndex(), modulePin});
+    }
+
+    for (const auto& task : tasks) {
+        auto it = context.objectHeap.find(task.objectId);
+        if (it == context.objectHeap.end() || !it->second) {
+            continue;
+        }
+
+        std::size_t deleteFunctionIndex = 0;
+        if (!tryFindClassMethodInModule(*task.modulePin,
+                                        task.classIndex,
+                                        "__delete__",
+                                        deleteFunctionIndex)) {
+            continue;
+        }
+
+        context.state = RunState::Running;
+        pushCallFrame(context,
+                      task.modulePin,
+                      deleteFunctionIndex,
+                      {makeRefValue(task.objectId)});
+
+        while (true) {
+            const auto state = resume(context, 1000);
+            if (state == RunState::Completed) {
+                break;
+            }
+            if (state == RunState::Suspended) {
+                const auto now = std::chrono::steady_clock::now();
+                if (context.wakeTime > now) {
+                    std::this_thread::sleep_for(context.wakeTime - now);
+                }
             }
         }
     }

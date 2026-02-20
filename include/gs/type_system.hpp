@@ -152,14 +152,18 @@ private:
 
 class FunctionObject : public Object {
 public:
-    FunctionObject(const Type& typeRef, std::size_t functionIndex);
+    FunctionObject(const Type& typeRef,
+                   std::size_t functionIndex,
+                   std::shared_ptr<const Module> modulePin = nullptr);
 
     const Type& getType() const override;
     std::size_t functionIndex() const;
+    const std::shared_ptr<const Module>& modulePin() const;
 
 private:
     const Type* type_;
     std::size_t functionIndex_{0};
+    std::shared_ptr<const Module> modulePin_;
 };
 
 class FunctionType : public Type {
@@ -169,13 +173,73 @@ public:
     std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override;
 };
 
+class ClassObject : public Object {
+public:
+    ClassObject(const Type& typeRef,
+                std::string className,
+                std::size_t classIndex,
+                std::shared_ptr<const Module> modulePin);
+
+    const Type& getType() const override;
+    const std::string& className() const;
+    std::size_t classIndex() const;
+    const std::shared_ptr<const Module>& modulePin() const;
+
+private:
+    const Type* type_;
+    std::string className_;
+    std::size_t classIndex_{0};
+    std::shared_ptr<const Module> modulePin_;
+};
+
+class ClassType : public Type {
+public:
+    ClassType();
+    const char* name() const override;
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override;
+};
+
+class ModuleObject : public Object {
+public:
+    ModuleObject(const Type& typeRef, std::string moduleName, std::shared_ptr<const Module> modulePin = nullptr);
+
+    const Type& getType() const override;
+    const std::string& moduleName() const;
+    const std::shared_ptr<const Module>& modulePin() const;
+    void setModulePin(std::shared_ptr<const Module> modulePin);
+    std::unordered_map<std::string, Value>& exports();
+    const std::unordered_map<std::string, Value>& exports() const;
+
+private:
+    const Type* type_;
+    std::string moduleName_;
+    std::shared_ptr<const Module> modulePin_;
+    std::unordered_map<std::string, Value> exports_;
+};
+
+class ModuleType : public Type {
+public:
+    ModuleType();
+    const char* name() const override;
+    Value getMember(Object& self, const std::string& member) const override;
+    Value setMember(Object& self, const std::string& member, const Value& value) const override;
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override;
+
+private:
+    static ModuleObject& requireModule(Object& self);
+};
+
 class ScriptInstanceObject : public Object {
 public:
-    ScriptInstanceObject(const Type& typeRef, std::size_t classIndex, std::string className);
+    ScriptInstanceObject(const Type& typeRef,
+                         std::size_t classIndex,
+                         std::string className,
+                         std::shared_ptr<const Module> modulePin = nullptr);
 
     const Type& getType() const override;
     std::size_t classIndex() const;
     const std::string& className() const;
+    const std::shared_ptr<const Module>& modulePin() const;
     std::unordered_map<std::string, Value>& fields();
     const std::unordered_map<std::string, Value>& fields() const;
 
@@ -183,6 +247,7 @@ private:
     const Type* type_;
     std::size_t classIndex_{0};
     std::string className_;
+    std::shared_ptr<const Module> modulePin_;
     std::unordered_map<std::string, Value> fields_;
 };
 

@@ -377,8 +377,10 @@ Value DictType::memberLengthSet(Object& self, const Value& value) const {
     throw std::runtime_error("Dict.length is read-only");
 }
 
-FunctionObject::FunctionObject(const Type& typeRef, std::size_t functionIndex)
-    : type_(&typeRef), functionIndex_(functionIndex) {}
+FunctionObject::FunctionObject(const Type& typeRef,
+                               std::size_t functionIndex,
+                               std::shared_ptr<const Module> modulePin)
+    : type_(&typeRef), functionIndex_(functionIndex), modulePin_(std::move(modulePin)) {}
 
 const Type& FunctionObject::getType() const {
     return *type_;
@@ -386,6 +388,10 @@ const Type& FunctionObject::getType() const {
 
 std::size_t FunctionObject::functionIndex() const {
     return functionIndex_;
+}
+
+const std::shared_ptr<const Module>& FunctionObject::modulePin() const {
+    return modulePin_;
 }
 
 const char* FunctionType::name() const {
@@ -408,8 +414,125 @@ std::string FunctionType::__str__(Object& self, const ValueStrInvoker& valueStr)
     return "[Function]";
 }
 
-ScriptInstanceObject::ScriptInstanceObject(const Type& typeRef, std::size_t classIndex, std::string className)
-    : type_(&typeRef), classIndex_(classIndex), className_(std::move(className)) {}
+ClassObject::ClassObject(const Type& typeRef,
+                         std::string className,
+                         std::size_t classIndex,
+                         std::shared_ptr<const Module> modulePin)
+    : type_(&typeRef),
+      className_(std::move(className)),
+      classIndex_(classIndex),
+      modulePin_(std::move(modulePin)) {}
+
+const Type& ClassObject::getType() const {
+    return *type_;
+}
+
+const std::string& ClassObject::className() const {
+    return className_;
+}
+
+std::size_t ClassObject::classIndex() const {
+    return classIndex_;
+}
+
+const std::shared_ptr<const Module>& ClassObject::modulePin() const {
+    return modulePin_;
+}
+
+ClassType::ClassType() {
+    registerMethodAttribute("__str__", 0, [this](Object& self,
+                                                  const std::vector<Value>& args,
+                                                  const StringFactory& makeString,
+                                                  const ValueStrInvoker& valueStr) {
+        (void)args;
+        return makeString(__str__(self, valueStr));
+    });
+}
+
+const char* ClassType::name() const {
+    return "Class";
+}
+
+std::string ClassType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    auto* cls = dynamic_cast<ClassObject*>(&self);
+    if (!cls) {
+        throw std::runtime_error("ClassType called with non-class object");
+    }
+
+    (void)valueStr;
+    return "[Class " + cls->className() + "]";
+}
+
+ModuleObject::ModuleObject(const Type& typeRef, std::string moduleName, std::shared_ptr<const Module> modulePin)
+    : type_(&typeRef), moduleName_(std::move(moduleName)), modulePin_(std::move(modulePin)) {}
+
+const Type& ModuleObject::getType() const {
+    return *type_;
+}
+
+const std::string& ModuleObject::moduleName() const {
+    return moduleName_;
+}
+
+const std::shared_ptr<const Module>& ModuleObject::modulePin() const {
+    return modulePin_;
+}
+
+void ModuleObject::setModulePin(std::shared_ptr<const Module> modulePin) {
+    modulePin_ = std::move(modulePin);
+}
+
+std::unordered_map<std::string, Value>& ModuleObject::exports() {
+    return exports_;
+}
+
+const std::unordered_map<std::string, Value>& ModuleObject::exports() const {
+    return exports_;
+}
+
+ModuleType::ModuleType() = default;
+
+const char* ModuleType::name() const {
+    return "Module";
+}
+
+Value ModuleType::getMember(Object& self, const std::string& member) const {
+    auto& module = requireModule(self);
+    auto it = module.exports().find(member);
+    if (it != module.exports().end()) {
+        return it->second;
+    }
+    return Type::getMember(self, member);
+}
+
+Value ModuleType::setMember(Object& self, const std::string& member, const Value& value) const {
+    auto& module = requireModule(self);
+    module.exports()[member] = value;
+    return value;
+}
+
+std::string ModuleType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
+    auto& module = requireModule(self);
+    (void)valueStr;
+    return "Module(" + module.moduleName() + ")#" + std::to_string(module.objectId());
+}
+
+ModuleObject& ModuleType::requireModule(Object& self) {
+    auto* module = dynamic_cast<ModuleObject*>(&self);
+    if (!module) {
+        throw std::runtime_error("ModuleType called with non-module object");
+    }
+    return *module;
+}
+
+ScriptInstanceObject::ScriptInstanceObject(const Type& typeRef,
+                                                                                     std::size_t classIndex,
+                                                                                     std::string className,
+                                                                                     std::shared_ptr<const Module> modulePin)
+        : type_(&typeRef),
+            classIndex_(classIndex),
+            className_(std::move(className)),
+            modulePin_(std::move(modulePin)) {}
 
 const Type& ScriptInstanceObject::getType() const {
     return *type_;
@@ -421,6 +544,10 @@ std::size_t ScriptInstanceObject::classIndex() const {
 
 const std::string& ScriptInstanceObject::className() const {
     return className_;
+}
+
+const std::shared_ptr<const Module>& ScriptInstanceObject::modulePin() const {
+    return modulePin_;
 }
 
 std::unordered_map<std::string, Value>& ScriptInstanceObject::fields() {

@@ -65,12 +65,17 @@ bool Runtime::loadSourceFile(const std::string& path, const std::vector<std::str
         return false;
     }
 
-    const auto source = readFile(resolvedPath);
-    if (source.empty()) {
+    std::vector<std::string> importSearchPaths = searchPaths;
+    importSearchPaths.push_back(std::filesystem::path(resolvedPath).parent_path().string());
+
+    Module compiled;
+    try {
+        compiled = compileSourceFile(resolvedPath, importSearchPaths);
+    } catch (...) {
         return false;
     }
 
-    auto newModule = std::make_shared<Module>(compileSource(source));
+    auto newModule = std::make_shared<Module>(std::move(compiled));
     {
         std::scoped_lock lock(moduleMutex_);
         module_ = std::move(newModule);

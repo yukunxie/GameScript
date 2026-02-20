@@ -56,7 +56,7 @@
       "patterns": [
         {
           "name": "keyword.control.gs",
-          "match": "\\b(fn|class|extends|let|for|in|if|elif|else|while|break|continue|return|spawn|await|sleep|yield)\\b"
+          "match": "\\b(fn|class|extends|let|for|in|if|elif|else|while|break|continue|return|spawn|await|sleep|yield|import|from|as)\\b"
         }
       ]
     },

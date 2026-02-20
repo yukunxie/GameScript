@@ -109,6 +109,7 @@ struct ClassDecl {
 struct Program {
     std::vector<ClassDecl> classes;
     std::vector<FunctionDecl> functions;
+    std::vector<Stmt> topLevelLets;
 };
 
 class Parser {

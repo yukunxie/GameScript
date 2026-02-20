@@ -24,4 +24,5 @@ compile_commands.json
 Thumbs.db
 
 # Bytecode outputs
+*.gsb
 *.gsbc

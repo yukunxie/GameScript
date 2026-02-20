@@ -1,87 +1,22 @@
-# fn worker(v) {
-#     sleep 10;
-#     return v * 2;
-# }
-
-fn animalVoice(self) {
-    print("animal");
-    return 1;
-}
-
-fn dogVoice(self) {
-    print("dog");
-    return 2;
-}
-
-class Animal {
-    Name = "Cat";
-    VoiceFn = animalVoice;
-
-    fn speak(self) {
-        print(self.Name);
-        return self.VoiceFn();
-    }
-}
-
-class Dog extends Animal {
-    Name = "Dog";
-    VoiceFn = dogVoice;
-
-    fn speak(self) {
-        print(self.Name);
-        return self.VoiceFn();
-    }
-}
+import object.creatures as creatures;
+import misc.flow as flow;
 
 fn tick() {
-    let a = 1;
-    yield;
-    let b = a + 2;
-    return b;
+    return flow.tick();
 }
 
-fn loop_demo() {
-    let total = 0;
-
-    for (i in range(5)) {
-        let total = total + i;
-    }
-    print(total);
-
-    for (i in range(3, 7)) {
-        print(i);
-    }
-
-    let list = [10, 20, 30];
-    for (k in list) {
-        print(k);
-    }
-
-    let dict = {1: 100, 2: 200};
-
-    let i = 0;
-    while (i < 10) {
-        let i = i + 1;
-        if (i == 3) {
-            continue;
-        }
-        if (i > 6) {
-            break;
-        }
-        print(i);
-    }
-
-    return total;
-}
+let agggg = 10;
 
 fn main() {
+
+    print ("hello world", agggg);
     let base = 40 + 2;
     print(base);
     let baseStr = str(base);
     print(baseStr);
 
     print("loop start");
-    let loopTotal = loop_demo();
+    let loopTotal = flow.loop_demo();
     print(loopTotal);
     print("loop end");
 
@@ -108,8 +43,8 @@ fn main() {
     # let task = spawn worker(base);
     # let result = await task;
 
-    let animal = Animal();
-    let dog = Dog();
+    let animal = creatures.Animal();
+    let dog = creatures.Dog();
     print("type(animal)", type(animal));
     print("type(dog)", type(dog));
     print(str(animal));
@@ -117,7 +52,7 @@ fn main() {
     print(str(dog));
     print(dog.__str__());
 
-    dog.VoiceFn = animalVoice;
+    dog.VoiceFn = creatures.animalVoice;
 
     print(animal.Name);
     print(dog.Name);

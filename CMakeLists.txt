@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(GameScript LANGUAGES CXX)
 
+if(WIN32)
+    if(NOT CMAKE_GENERATOR MATCHES "^Visual Studio (18 2026|17 2022)$")
+        message(FATAL_ERROR "GameScript requires Visual Studio generator: prefer 'Visual Studio 18 2026', fallback 'Visual Studio 17 2022'. Current generator: ${CMAKE_GENERATOR}")
+    endif()
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -61,4 +67,5 @@ if(GS_BUILD_DEMO)
     target_link_libraries(gs_demo PRIVATE gamescript)
     target_compile_definitions(gs_demo PRIVATE GS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES app/main.cpp)
+    set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gs_demo)
 endif()

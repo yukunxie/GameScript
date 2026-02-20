@@ -146,11 +146,17 @@ struct ClassBytecode {
     std::vector<ClassMethodBinding> methods;
 };
 
+struct GlobalBinding {
+    std::string name;
+    Value initialValue{Value::Nil()};
+};
+
 struct Module {
     std::vector<Value> constants;
     std::vector<std::string> strings;
     std::vector<FunctionBytecode> functions;
     std::vector<ClassBytecode> classes;
+    std::vector<GlobalBinding> globals;
 };
 
 } // namespace gs

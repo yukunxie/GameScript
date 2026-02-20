@@ -1,12 +1,51 @@
 #include "gs/global.hpp"
+#include "gs/compiler.hpp"
+#include "gs/type_system.hpp"
 
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace gs {
 
 namespace {
+
+std::string resolveModulePath(const std::string& moduleSpec) {
+    namespace fs = std::filesystem;
+    std::string normalized = moduleSpec;
+    if (normalized.find('/') == std::string::npos && normalized.find('\\') == std::string::npos) {
+        for (char& c : normalized) {
+            if (c == '.') {
+                c = '/';
+            }
+        }
+    }
+
+    std::vector<std::string> candidates;
+    candidates.push_back(normalized);
+    if (normalized.size() < 3 || normalized.substr(normalized.size() - 3) != ".gs") {
+        candidates.push_back(normalized + ".gs");
+    }
+
+    const std::vector<fs::path> roots = {
+        fs::current_path(),
+        fs::current_path() / "scripts",
+        fs::current_path().parent_path() / "scripts"
+    };
+
+    for (const auto& candidate : candidates) {
+        for (const auto& root : roots) {
+            fs::path path = root / candidate;
+            if (fs::exists(path)) {
+                return fs::weakly_canonical(path).string();
+            }
+        }
+    }
+
+    return {};
+}
 
 void printValues(HostContext& context,
                  const std::vector<Value>& args,
@@ -32,6 +71,31 @@ void printValues(HostContext& context,
 } // namespace
 
 void bindGlobalModule(HostRegistry& host) {
+    host.bind("Module", [](HostContext& context, const std::vector<Value>& args) -> Value {
+        if (args.size() > 1) {
+            throw std::runtime_error("Module() accepts 0 or 1 argument");
+        }
+        std::string moduleName = "module";
+        if (args.size() == 1) {
+            moduleName = context.__str__(args[0]);
+        }
+
+        const std::string modulePath = resolveModulePath(moduleName);
+        if (modulePath.empty()) {
+            throw std::runtime_error("Module not found: " + moduleName);
+        }
+
+        static std::unordered_map<std::string, std::shared_ptr<Module>> moduleCache;
+        auto it = moduleCache.find(modulePath);
+        if (it == moduleCache.end()) {
+            auto compiled = std::make_shared<Module>(compileSourceFile(modulePath));
+            it = moduleCache.emplace(modulePath, std::move(compiled)).first;
+        }
+
+        static ModuleType moduleType;
+        return context.createObject(std::make_unique<ModuleObject>(moduleType, moduleName, it->second));
+    });
+
     host.bind("print", [](HostContext& context, const std::vector<Value>& args) -> Value {
         printValues(context, args, true, true, ", ");
         return Value::Int(0);

@@ -6,14 +6,6 @@
 
 namespace {
 
-std::string readAll(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return {};
-    }
-    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-}
-
 bool writeAll(const std::string& path, const std::string& text) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
@@ -34,14 +26,8 @@ int main(int argc, char** argv) {
     const std::string inputPath = argv[1];
     const std::string outputPath = argv[2];
 
-    const auto source = readAll(inputPath);
-    if (source.empty()) {
-        std::cerr << "Failed to read input file: " << inputPath << "\n";
-        return 2;
-    }
-
     try {
-        const gs::Module module = gs::compileSource(source);
+        const gs::Module module = gs::compileSourceFile(inputPath);
         if (!writeAll(outputPath, gs::serializeModuleText(module))) {
             std::cerr << "Failed to write bytecode file: " << outputPath << "\n";
             return 3;
