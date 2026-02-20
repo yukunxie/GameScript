@@ -21,7 +21,9 @@ enum class ExprType {
     Call,
     MethodCall,
     PropertyAccess,
-    AssignProperty
+    IndexAccess,
+    AssignProperty,
+    AssignIndex
 };
 
 struct DictEntry {
@@ -44,6 +46,7 @@ struct Expr {
     std::unique_ptr<Expr> object;
     std::string methodName;
     std::string propertyName;
+    std::unique_ptr<Expr> index;
 };
 
 enum class StmtType {

@@ -478,6 +478,15 @@ void compileExpr(const Expr& expr,
         compileExpr(*expr.right, module, locals, funcIndex, classIndex, code);
         emit(code, OpCode::StoreAttr, addString(module, expr.propertyName), 0);
         return;
+    case ExprType::AssignIndex:
+        if (!expr.object || !expr.index || !expr.right) {
+            throw std::runtime_error("Index assignment expression is incomplete");
+        }
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.index, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.right, module, locals, funcIndex, classIndex, code);
+        emit(code, OpCode::CallMethod, addString(module, "set"), 2);
+        return;
     case ExprType::Binary:
         compileExpr(*expr.left, module, locals, funcIndex, classIndex, code);
         compileExpr(*expr.right, module, locals, funcIndex, classIndex, code);
@@ -607,6 +616,14 @@ void compileExpr(const Expr& expr,
         }
         compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
         emit(code, OpCode::LoadAttr, addString(module, expr.propertyName), 0);
+        return;
+    case ExprType::IndexAccess:
+        if (!expr.object || !expr.index) {
+            throw std::runtime_error("Index access expression is incomplete");
+        }
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.index, module, locals, funcIndex, classIndex, code);
+        emit(code, OpCode::CallMethod, addString(module, "get"), 1);
         return;
     }
 }

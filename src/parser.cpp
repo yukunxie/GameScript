@@ -174,6 +174,16 @@ Expr Parser::parsePostfix(Expr expr) {
             continue;
         }
 
+        if (match(TokenType::LBracket)) {
+            Expr indexAccess;
+            indexAccess.type = ExprType::IndexAccess;
+            indexAccess.object = std::make_unique<Expr>(std::move(expr));
+            indexAccess.index = std::make_unique<Expr>(parseExpression());
+            consume(TokenType::RBracket, "Expected ']' after index expression");
+            expr = std::move(indexAccess);
+            continue;
+        }
+
         break;
     }
 
@@ -349,16 +359,25 @@ Expr Parser::parseAssignment() {
     }
 
     Expr rhs = parseAssignment();
-    if (lhs.type != ExprType::PropertyAccess) {
-        throw std::runtime_error("Only object property assignment is supported");
+    if (lhs.type == ExprType::PropertyAccess) {
+        Expr expr;
+        expr.type = ExprType::AssignProperty;
+        expr.object = std::move(lhs.object);
+        expr.propertyName = lhs.propertyName;
+        expr.right = std::make_unique<Expr>(std::move(rhs));
+        return expr;
     }
 
-    Expr expr;
-    expr.type = ExprType::AssignProperty;
-    expr.object = std::move(lhs.object);
-    expr.propertyName = lhs.propertyName;
-    expr.right = std::make_unique<Expr>(std::move(rhs));
-    return expr;
+    if (lhs.type == ExprType::IndexAccess) {
+        Expr expr;
+        expr.type = ExprType::AssignIndex;
+        expr.object = std::move(lhs.object);
+        expr.index = std::move(lhs.index);
+        expr.right = std::make_unique<Expr>(std::move(rhs));
+        return expr;
+    }
+
+    throw std::runtime_error("Only object property or index assignment is supported");
 }
 
 Expr Parser::parseEquality() {

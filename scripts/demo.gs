@@ -21,11 +21,11 @@ fn main() {
     print("loop end");
 
     let dict = {};
-    dict.set(1, base);
+    dict[1] = base;
     print("dict1", dict);
-    let oldValue = dict.get(1);
-    print(oldValue);
-    dict.set(1, oldValue + 1);
+    let oldValue = dict[1];
+    print("[index]", oldValue);
+    dict[1] = oldValue + 1;
     let removedDict = dict.del(1);
     
 
@@ -34,9 +34,9 @@ fn main() {
     let list = [];
     list.push(10);
     list.push(20);
-    let first = list.get(0);
+    let first = list[0];
     print(first);
-    list.set(1, base);
+    list[1] = base;
     let removedList = list.remove(1);
     print(removedList);
 
