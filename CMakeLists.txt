@@ -17,7 +17,13 @@ option(GS_BUILD_DEMO "Build demo runtime app" ON)
 set(GS_LIB_SOURCES
     src/binding.cpp
     src/global.cpp
-    src/type_system.cpp
+    src/type_system/type_base.cpp
+    src/type_system/list_type.cpp
+    src/type_system/dict_type.cpp
+    src/type_system/function_type.cpp
+    src/type_system/class_type.cpp
+    src/type_system/module_type.cpp
+    src/type_system/script_instance_type.cpp
     src/tokenizer.cpp
     src/parser.cpp
     src/compiler.cpp
@@ -38,6 +44,13 @@ set(GS_LIB_HEADERS
     include/gs/thread_pool.hpp
     include/gs/tokenizer.hpp
     include/gs/type_system.hpp
+    include/gs/type_system/type_base.hpp
+    include/gs/type_system/list_type.hpp
+    include/gs/type_system/dict_type.hpp
+    include/gs/type_system/function_type.hpp
+    include/gs/type_system/class_type.hpp
+    include/gs/type_system/module_type.hpp
+    include/gs/type_system/script_instance_type.hpp
     include/gs/vm.hpp
 )
 
