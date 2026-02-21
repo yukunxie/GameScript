@@ -270,6 +270,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
     std::ostringstream bodySource;
     std::vector<std::pair<std::string, std::string>> symbolAliases;
     std::vector<ModuleAliasBinding> moduleAliases;
+    bool hasSystemAlias{false};
     std::size_t internalAliasIndex = 0;
 
     const auto lines = splitLines(source);
@@ -280,15 +281,21 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
             continue;
         }
 
-        const std::string resolvedImport = resolveImportPath(stmt.moduleSpec, canonical, searchPaths);
-        if (resolvedImport.empty()) {
-            throw std::runtime_error("Cannot resolve import '" + stmt.moduleSpec + "' from " + canonical);
-        }
+        const bool isBuiltinSystem = (stmt.moduleSpec == "system" || stmt.moduleSpec == "system.gs");
+        if (!isBuiltinSystem) {
+            const std::string resolvedImport = resolveImportPath(stmt.moduleSpec, canonical, searchPaths);
+            if (resolvedImport.empty()) {
+                throw std::runtime_error("Cannot resolve import '" + stmt.moduleSpec + "' from " + canonical);
+            }
 
-        const auto imported = preprocessImportsRecursive(resolvedImport, searchPaths, cache, visiting);
+            (void)preprocessImportsRecursive(resolvedImport, searchPaths, cache, visiting);
+        }
 
         if (!stmt.isFrom) {
             const std::string alias = stmt.alias.empty() ? defaultModuleAlias(stmt.moduleSpec) : stmt.alias;
+            if (alias == "system") {
+                hasSystemAlias = true;
+            }
             moduleAliases.push_back({alias, stmt.moduleSpec, {}});
             continue;
         }
@@ -297,14 +304,24 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
             if (stmt.alias.empty()) {
                 throw std::runtime_error("from " + stmt.moduleSpec + " import * requires alias in strict module mode");
             }
+            if (stmt.alias == "system") {
+                hasSystemAlias = true;
+            }
             moduleAliases.push_back({stmt.alias, stmt.moduleSpec, {}});
             continue;
         }
 
         const std::string alias = stmt.alias.empty() ? stmt.importName : stmt.alias;
+        if (alias == "system") {
+            hasSystemAlias = true;
+        }
         const std::string internalModuleAlias = makeInternalAlias(stmt.moduleSpec, internalAliasIndex++);
         moduleAliases.push_back({internalModuleAlias, stmt.moduleSpec, {}});
         symbolAliases.push_back({alias, internalModuleAlias + "." + stmt.importName});
+    }
+
+    if (!hasSystemAlias) {
+        moduleAliases.push_back({"system", "system", {}});
     }
 
     std::string body = bodySource.str();
@@ -375,9 +392,7 @@ bool resolveNamedValue(const Module& module,
 
 struct SymbolLookupResult {
     bool found{false};
-    bool isLocal{false};
     std::size_t localSlot{0};
-    Value value{Value::Nil()};
 };
 
 SymbolLookupResult resolveSymbol(const std::unordered_map<std::string, std::size_t>& locals,
@@ -390,16 +405,7 @@ SymbolLookupResult resolveSymbol(const std::unordered_map<std::string, std::size
     auto localIt = locals.find(name);
     if (localIt != locals.end()) {
         result.found = true;
-        result.isLocal = true;
         result.localSlot = localIt->second;
-        return result;
-    }
-
-    Value namedValue = Value::Nil();
-    if (resolveNamedValue(module, funcIndex, classIndex, name, namedValue)) {
-        result.found = true;
-        result.value = namedValue;
-        return result;
     }
 
     return result;
@@ -515,18 +521,11 @@ void compileExpr(const Expr& expr,
                                                           classIndex,
                                                           expr.name);
         if (!resolved.found) {
-            throw std::runtime_error("Undefined variable: " + expr.name);
-        }
-
-        if (resolved.isLocal) {
-            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+            emit(code, OpCode::LoadName, addString(module, expr.name), 0);
             return;
         }
 
-        emit(code,
-             OpCode::PushConst,
-             addConstant(module, resolved.value),
-             0);
+        emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
         return;
     }
     case ExprType::AssignProperty:
@@ -611,40 +610,16 @@ void compileExpr(const Expr& expr,
                                                               classIndex,
                                                               calleeName);
 
-            if (resolved.found && !resolved.isLocal && resolved.value.isClass()) {
-                for (const auto& arg : expr.args) {
-                    compileExpr(arg, module, locals, funcIndex, classIndex, code);
-                }
-                emit(code,
-                     OpCode::NewInstance,
-                     static_cast<std::int32_t>(resolved.value.asClassIndex()),
-                     static_cast<std::int32_t>(expr.args.size()));
-                return;
-            }
-
-            if (resolved.found && !resolved.isLocal && resolved.value.isFunction()) {
-                for (const auto& arg : expr.args) {
-                    compileExpr(arg, module, locals, funcIndex, classIndex, code);
-                }
-                emit(code,
-                     OpCode::CallFunc,
-                     static_cast<std::int32_t>(resolved.value.asFunctionIndex()),
-                     static_cast<std::int32_t>(expr.args.size()));
-                return;
-            }
-
             if (!resolved.found) {
+                emit(code, OpCode::LoadName, addString(module, calleeName), 0);
                 for (const auto& arg : expr.args) {
                     compileExpr(arg, module, locals, funcIndex, classIndex, code);
                 }
-                emit(code,
-                     OpCode::CallHost,
-                     addString(module, calleeName),
-                     static_cast<std::int32_t>(expr.args.size()));
+                emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
                 return;
             }
 
-            compileExpr(*expr.callee, module, locals, funcIndex, classIndex, code);
+            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
             for (const auto& arg : expr.args) {
                 compileExpr(arg, module, locals, funcIndex, classIndex, code);
             }
@@ -706,31 +681,10 @@ void compileStatements(const std::vector<Stmt>& statements,
             break;
         }
         case StmtType::LetSpawn: {
-            for (const auto& arg : stmt.call.args) {
-                compileExpr(arg, module, locals, funcIndex, classIndex, out.code);
-            }
-            auto it = funcIndex.find(stmt.call.callee);
-            if (it == funcIndex.end()) {
-                throw std::runtime_error("Unknown spawn function: " + stmt.call.callee);
-            }
-            emit(out.code,
-                 OpCode::SpawnFunc,
-                 static_cast<std::int32_t>(it->second),
-                 static_cast<std::int32_t>(stmt.call.args.size()));
-            const auto slot = ensureLocal(locals, out, stmt.name);
-            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
-            break;
+            throw std::runtime_error("'spawn' is temporarily disabled. Coroutine features are not enabled.");
         }
         case StmtType::LetAwait: {
-            auto src = locals.find(stmt.awaitSource);
-            if (src == locals.end()) {
-                throw std::runtime_error("Await source variable not found: " + stmt.awaitSource);
-            }
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(src->second));
-            emit(out.code, OpCode::Await);
-            const auto slot = ensureLocal(locals, out, stmt.name);
-            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
-            break;
+            throw std::runtime_error("'await' is temporarily disabled. Coroutine features are not enabled.");
         }
         case StmtType::ForRange: {
             const auto iterSlot = ensureLocal(locals, out, stmt.iterKey);
@@ -927,11 +881,9 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::Return);
             break;
         case StmtType::Sleep:
-            emit(out.code, OpCode::Sleep, static_cast<std::int32_t>(stmt.sleepMs.asInt()));
-            break;
+            throw std::runtime_error("'sleep' is temporarily disabled. Coroutine features are not enabled.");
         case StmtType::Yield:
-            emit(out.code, OpCode::Yield);
-            break;
+            throw std::runtime_error("'yield' is temporarily disabled. Coroutine features are not enabled.");
         }
     }
 }
@@ -1276,6 +1228,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             switch (ins.op) {
             case OpCode::PushConst: out << "PushConst"; break;
             case OpCode::LoadLocal: out << "LoadLocal"; break;
+            case OpCode::LoadName: out << "LoadName"; break;
             case OpCode::StoreLocal: out << "StoreLocal"; break;
             case OpCode::Add: out << "Add"; break;
             case OpCode::Sub: out << "Sub"; break;

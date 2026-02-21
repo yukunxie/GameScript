@@ -148,6 +148,7 @@ inline std::ostream& operator<<(std::ostream& os, const Value& value) {
 enum class OpCode : std::uint8_t {
     PushConst,
     LoadLocal,
+    LoadName,
     StoreLocal,
     Add,
     Sub,

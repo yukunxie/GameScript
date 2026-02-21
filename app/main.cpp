@@ -299,11 +299,7 @@ int main() {
     const auto result = runtime.call("main");
     std::cout << "main() -> " << result << '\n';
 
-    auto coroutine = runtime.startCoroutine("tick");
-    while (runtime.resumeCoroutine(coroutine, 32) != gs::RunState::Completed) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    std::cout << "tick() -> " << coroutine.returnValue << '\n';
+    // std::cout << "tick() -> " << runtime.call("tick") << '\n';
 
     runtime.saveBytecode("scripts/demo.gsbc");
 

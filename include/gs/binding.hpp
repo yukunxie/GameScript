@@ -22,6 +22,7 @@ public:
     virtual std::string __str__(const Value& value) = 0;
     virtual std::string typeName(const Value& value) = 0;
     virtual std::uint64_t objectId(const Value& ref) = 0;
+    virtual Value collectGarbage(std::int64_t generation) = 0;
 };
 
 using HostFunction = std::function<Value(HostContext& context, const std::vector<Value>&)>;

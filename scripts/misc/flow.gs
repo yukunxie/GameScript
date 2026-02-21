@@ -1,9 +1,9 @@
-fn tick() {
-    let a = 1;
-    yield;
-    let b = a + 2;
-    return b;
-}
+# fn tick() {
+#     let a = 1;
+#     yield;
+#     let b = a + 2;
+#     return b;
+# }
 
 fn loop_demo() {
     let total = 0;

@@ -68,6 +68,10 @@ void printValues(HostContext& context,
     }
 }
 
+std::shared_ptr<Module> createSystemBuiltinModule() {
+    return std::make_shared<Module>();
+}
+
 } // namespace
 
 void bindGlobalModule(HostRegistry& host) {
@@ -78,6 +82,23 @@ void bindGlobalModule(HostRegistry& host) {
         std::string moduleName = "module";
         if (args.size() == 1) {
             moduleName = context.__str__(args[0]);
+        }
+
+        static ModuleType moduleType;
+        static NativeFunctionType nativeFunctionType;
+        if (moduleName == "system") {
+            static std::shared_ptr<Module> systemModule = createSystemBuiltinModule();
+            auto moduleObject = std::make_unique<ModuleObject>(moduleType, moduleName, systemModule);
+            moduleObject->exports()["gc"] = context.createObject(std::make_unique<NativeFunctionObject>(nativeFunctionType,
+                                                                                                           "gc",
+                                                                                                           [](HostContext& ctx, const std::vector<Value>& fnArgs) -> Value {
+                                                                                                               const std::int64_t generation = fnArgs.empty() ? 1 : fnArgs[0].asInt();
+                                                                                                               if (fnArgs.size() > 1) {
+                                                                                                                   throw std::runtime_error("system.gc() accepts zero or one argument");
+                                                                                                               }
+                                                                                                               return ctx.collectGarbage(generation);
+                                                                                                           }));
+            return context.createObject(std::move(moduleObject));
         }
 
         const std::string modulePath = resolveModulePath(moduleName);
@@ -92,7 +113,6 @@ void bindGlobalModule(HostRegistry& host) {
             it = moduleCache.emplace(modulePath, std::move(compiled)).first;
         }
 
-        static ModuleType moduleType;
         return context.createObject(std::make_unique<ModuleObject>(moduleType, moduleName, it->second));
     });
 

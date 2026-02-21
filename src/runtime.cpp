@@ -111,26 +111,6 @@ Value Runtime::call(const std::string& functionName, const std::vector<Value>& a
     return vm.runFunction(functionName, args);
 }
 
-ExecutionContext Runtime::startCoroutine(const std::string& functionName, const std::vector<Value>& args) {
-    std::shared_ptr<Module> snapshot;
-    {
-        std::scoped_lock lock(moduleMutex_);
-        snapshot = module_;
-    }
-    VirtualMachine vm(snapshot, hosts_, tasks_);
-    return vm.beginCoroutine(functionName, args);
-}
-
-RunState Runtime::resumeCoroutine(ExecutionContext& context, std::size_t budget) {
-    auto snapshot = context.modulePin;
-    if (!snapshot) {
-        std::scoped_lock lock(moduleMutex_);
-        snapshot = module_;
-    }
-    VirtualMachine vm(snapshot, hosts_, tasks_);
-    return vm.resume(context, budget);
-}
-
 bool Runtime::saveBytecode(const std::string& path) const {
     std::shared_ptr<Module> snapshot;
     {

@@ -5,17 +5,48 @@
 #include "gs/task_system.hpp"
 #include "gs/type_system.hpp"
 
-#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace gs {
 
-enum class RunState {
-    Running,
-    Suspended,
-    Completed
+enum class GcGeneration : std::uint8_t {
+    Young,
+    Old
+};
+
+enum class GcPhase : std::uint8_t {
+    Idle,
+    MinorMark,
+    MinorSweep,
+    MajorMark,
+    MajorSweep
+};
+
+struct GcObjectMeta {
+    GcGeneration generation{GcGeneration::Young};
+    std::uint8_t age{0};
+    bool marked{false};
+    std::uint32_t regionId{0};
+};
+
+struct GcState {
+    GcPhase phase{GcPhase::Idle};
+    bool requestMajor{false};
+    std::size_t allocCountSinceLastCycle{0};
+    std::size_t markCursor{0};
+    std::size_t sweepCursor{0};
+    std::vector<std::uint64_t> markQueue;
+    std::vector<std::uint64_t> sweepList;
+    std::unordered_set<std::uint64_t> rememberedSet;
+    std::size_t minorYoungThreshold{256};
+    std::size_t majorObjectThreshold{4096};
+    std::size_t promotionAge{2};
+    std::size_t sliceBudgetObjects{16};
 };
 
 struct Frame {
@@ -30,13 +61,14 @@ struct Frame {
 
 struct ExecutionContext {
     std::vector<Frame> frames;
-    RunState state{RunState::Running};
-    std::chrono::steady_clock::time_point wakeTime{};
     Value returnValue{Value::Nil()};
     bool deleteHooksRan{false};
     std::shared_ptr<const Module> modulePin;
     std::vector<std::string> stringPool;
     std::unordered_map<std::uint64_t, std::unique_ptr<Object>> objectHeap;
+    std::unordered_map<std::uint64_t, GcObjectMeta> gcMeta;
+    std::unordered_map<Object*, std::uint64_t> objectPtrToId;
+    GcState gc;
 };
 
 class VirtualMachine {
@@ -46,11 +78,10 @@ public:
                    TaskSystem& tasks);
 
     Value runFunction(const std::string& functionName, const std::vector<Value>& args = {});
-    ExecutionContext beginCoroutine(const std::string& functionName, const std::vector<Value>& args = {});
-    RunState resume(ExecutionContext& context, std::size_t stepBudget = 200);
 
 private:
     std::size_t findFunctionIndex(const std::string& name) const;
+    bool execute(ExecutionContext& context, std::size_t stepBudget = 200);
     static void pushCallFrame(ExecutionContext& ctx,
                               std::shared_ptr<const Module> modulePin,
                               std::size_t functionIndex,
@@ -67,6 +98,7 @@ private:
     ListType listType_;
     DictType dictType_;
     FunctionType functionType_;
+    NativeFunctionType nativeFunctionType_;
     ClassType classType_;
     ModuleType moduleType_;
     ScriptInstanceType instanceType_;

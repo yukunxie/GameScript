@@ -4,6 +4,7 @@
 #include "gs/type_system/list_type.hpp"
 #include "gs/type_system/dict_type.hpp"
 #include "gs/type_system/function_type.hpp"
+#include "gs/type_system/native_function_type.hpp"
 #include "gs/type_system/class_type.hpp"
 #include "gs/type_system/module_type.hpp"
 #include "gs/type_system/script_instance_type.hpp"

@@ -1,9 +1,10 @@
 import object.creatures as creatures;
 import misc.flow as flow;
+import system as system;
 
-fn tick() {
-    return flow.tick();
-}
+# fn tick() {
+#     return flow.tick();
+# }
 
 let agggg = 10;
 
@@ -42,6 +43,11 @@ fn main() {
     print("list(sorted)", list);
     let removedList = list.remove(1);
     print(removedList);
+
+    let majorReclaimed = system.gc();
+    print("gc(major-default)", majorReclaimed);
+    system.mydata = base;
+    print("system.mydata", system.mydata);
 
     # let task = spawn worker(base);
     # let result = await task;

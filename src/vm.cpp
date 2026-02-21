@@ -1,6 +1,7 @@
 #include "gs/vm.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <atomic>
 #include <stdexcept>
 #include <string>
@@ -49,11 +50,355 @@ std::uint64_t nextGlobalObjectId() {
     return nextId.fetch_add(1, std::memory_order_relaxed);
 }
 
+constexpr std::uint32_t kRegionSpanObjects = 256;
+
+bool tryGetObjectId(const ExecutionContext& context, Object* object, std::uint64_t& outId) {
+    if (!object) {
+        return false;
+    }
+    auto it = context.objectPtrToId.find(object);
+    if (it == context.objectPtrToId.end()) {
+        return false;
+    }
+    outId = it->second;
+    return true;
+}
+
+std::size_t countYoungObjects(const ExecutionContext& context) {
+    std::size_t count = 0;
+    for (const auto& [id, meta] : context.gcMeta) {
+        (void)id;
+        if (meta.generation == GcGeneration::Young) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool markObjectId(ExecutionContext& context,
+                  std::uint64_t objectId,
+                  bool youngOnly,
+                  bool forceQueue) {
+    auto metaIt = context.gcMeta.find(objectId);
+    if (metaIt == context.gcMeta.end()) {
+        return false;
+    }
+
+    auto& meta = metaIt->second;
+    if (youngOnly && meta.generation == GcGeneration::Old && !forceQueue) {
+        return false;
+    }
+    if (meta.marked && !forceQueue) {
+        return false;
+    }
+
+    meta.marked = true;
+    context.gc.markQueue.push_back(objectId);
+    return true;
+}
+
+void markValue(ExecutionContext& context, const Value& value, bool youngOnly) {
+    if (!value.isRef()) {
+        return;
+    }
+
+    std::uint64_t objectId = 0;
+    if (!tryGetObjectId(context, value.asRef(), objectId)) {
+        return;
+    }
+
+    (void)markObjectId(context, objectId, youngOnly, false);
+}
+
+void traceObjectChildren(ExecutionContext& context, std::uint64_t objectId, bool youngOnly) {
+    auto objectIt = context.objectHeap.find(objectId);
+    if (objectIt == context.objectHeap.end() || !objectIt->second) {
+        return;
+    }
+
+    Object* object = objectIt->second.get();
+    if (!object) {
+        return;
+    }
+
+    const auto markChild = [&](const Value& value) {
+        markValue(context, value, youngOnly);
+    };
+
+    if (auto* list = dynamic_cast<ListObject*>(object)) {
+        for (const auto& value : list->data()) {
+            markChild(value);
+        }
+        return;
+    }
+
+    if (auto* dict = dynamic_cast<DictObject*>(object)) {
+        for (const auto& [key, value] : dict->data()) {
+            (void)key;
+            markChild(value);
+        }
+        return;
+    }
+
+    if (auto* instance = dynamic_cast<ScriptInstanceObject*>(object)) {
+        for (const auto& [name, value] : instance->fields()) {
+            (void)name;
+            markChild(value);
+        }
+        return;
+    }
+
+    if (auto* moduleObject = dynamic_cast<ModuleObject*>(object)) {
+        for (const auto& [name, value] : moduleObject->exports()) {
+            (void)name;
+            markChild(value);
+        }
+        return;
+    }
+}
+
+void markRoots(ExecutionContext& context, bool youngOnly) {
+    for (const auto& frame : context.frames) {
+        markValue(context, frame.constructorInstance, youngOnly);
+        for (const auto& value : frame.locals) {
+            markValue(context, value, youngOnly);
+        }
+        for (const auto& value : frame.stack) {
+            markValue(context, value, youngOnly);
+        }
+    }
+    markValue(context, context.returnValue, youngOnly);
+
+    if (youngOnly) {
+        for (const auto objectId : context.gc.rememberedSet) {
+            (void)markObjectId(context, objectId, false, true);
+        }
+    }
+}
+
+void beginMinorGc(ExecutionContext& context) {
+    context.gc.phase = GcPhase::MinorMark;
+    context.gc.markQueue.clear();
+    context.gc.sweepList.clear();
+    context.gc.markCursor = 0;
+    context.gc.sweepCursor = 0;
+
+    for (auto& [id, meta] : context.gcMeta) {
+        (void)id;
+        if (meta.generation == GcGeneration::Young) {
+            meta.marked = false;
+        }
+    }
+
+    markRoots(context, true);
+}
+
+void beginMajorGc(ExecutionContext& context) {
+    context.gc.phase = GcPhase::MajorMark;
+    context.gc.markQueue.clear();
+    context.gc.sweepList.clear();
+    context.gc.markCursor = 0;
+    context.gc.sweepCursor = 0;
+
+    for (auto& [id, meta] : context.gcMeta) {
+        (void)id;
+        meta.marked = false;
+    }
+
+    markRoots(context, false);
+}
+
+void maybeStartGcCycle(ExecutionContext& context) {
+    if (context.gc.phase != GcPhase::Idle) {
+        return;
+    }
+
+    if (context.gc.requestMajor || context.objectHeap.size() >= context.gc.majorObjectThreshold) {
+        context.gc.requestMajor = false;
+        beginMajorGc(context);
+        return;
+    }
+
+    if (countYoungObjects(context) >= context.gc.minorYoungThreshold) {
+        beginMinorGc(context);
+    }
+}
+
+void prepareSweepList(ExecutionContext& context, bool youngOnly) {
+    context.gc.sweepList.clear();
+    context.gc.sweepList.reserve(context.gcMeta.size());
+    for (const auto& [id, meta] : context.gcMeta) {
+        if (youngOnly && meta.generation != GcGeneration::Young) {
+            continue;
+        }
+        context.gc.sweepList.push_back(id);
+    }
+    context.gc.sweepCursor = 0;
+}
+
+void finishGcCycle(ExecutionContext& context) {
+    context.gc.phase = GcPhase::Idle;
+    context.gc.markQueue.clear();
+    context.gc.sweepList.clear();
+    context.gc.markCursor = 0;
+    context.gc.sweepCursor = 0;
+    context.gc.allocCountSinceLastCycle = 0;
+}
+
+void runGcSlice(ExecutionContext& context, std::size_t budgetObjects) {
+    maybeStartGcCycle(context);
+    if (context.gc.phase == GcPhase::Idle) {
+        return;
+    }
+
+    std::size_t budget = budgetObjects == 0 ? 1 : budgetObjects;
+    while (budget > 0) {
+        if (context.gc.phase == GcPhase::MinorMark || context.gc.phase == GcPhase::MajorMark) {
+            if (!context.gc.markQueue.empty()) {
+                const std::uint64_t objectId = context.gc.markQueue.back();
+                context.gc.markQueue.pop_back();
+                const bool youngOnly = context.gc.phase == GcPhase::MinorMark;
+                traceObjectChildren(context, objectId, youngOnly);
+                --budget;
+                continue;
+            }
+
+            const bool youngOnly = context.gc.phase == GcPhase::MinorMark;
+            prepareSweepList(context, youngOnly);
+            context.gc.phase = youngOnly ? GcPhase::MinorSweep : GcPhase::MajorSweep;
+            continue;
+        }
+
+        if (context.gc.phase == GcPhase::MinorSweep || context.gc.phase == GcPhase::MajorSweep) {
+            const bool youngOnly = context.gc.phase == GcPhase::MinorSweep;
+            if (context.gc.sweepCursor >= context.gc.sweepList.size()) {
+                finishGcCycle(context);
+                break;
+            }
+
+            const std::uint64_t objectId = context.gc.sweepList[context.gc.sweepCursor++];
+            auto metaIt = context.gcMeta.find(objectId);
+            if (metaIt == context.gcMeta.end()) {
+                continue;
+            }
+
+            auto& meta = metaIt->second;
+            if (youngOnly && meta.generation != GcGeneration::Young) {
+                continue;
+            }
+
+            if (!meta.marked) {
+                auto objectIt = context.objectHeap.find(objectId);
+                if (objectIt != context.objectHeap.end() && objectIt->second) {
+                    if (!context.deleteHooksRan && dynamic_cast<ScriptInstanceObject*>(objectIt->second.get())) {
+                        --budget;
+                        continue;
+                    }
+                    context.objectPtrToId.erase(objectIt->second.get());
+                    context.objectHeap.erase(objectIt);
+                }
+                context.gcMeta.erase(metaIt);
+                context.gc.rememberedSet.erase(objectId);
+            } else {
+                if (youngOnly && meta.generation == GcGeneration::Young) {
+                    ++meta.age;
+                    if (meta.age >= context.gc.promotionAge) {
+                        meta.generation = GcGeneration::Old;
+                    }
+                }
+                meta.marked = false;
+            }
+
+            --budget;
+            continue;
+        }
+
+        break;
+    }
+}
+
+void runGcUntilIdle(ExecutionContext& context) {
+    if (context.gc.phase == GcPhase::Idle) {
+        return;
+    }
+
+    const std::size_t budget = std::max<std::size_t>(1, context.objectHeap.size() + context.gcMeta.size());
+    std::size_t guard = 0;
+    while (context.gc.phase != GcPhase::Idle) {
+        runGcSlice(context, budget);
+        ++guard;
+        if (guard > 8192) {
+            throw std::runtime_error("Manual GC did not converge");
+        }
+    }
+}
+
+Value collectGarbageNow(ExecutionContext& context, std::int64_t generation) {
+    if (generation != 0 && generation != 1) {
+        throw std::runtime_error("system.gc(generation): generation must be 0 (minor) or 1 (major)");
+    }
+
+    runGcUntilIdle(context);
+
+    const std::size_t before = context.objectHeap.size();
+    if (generation == 0) {
+        beginMinorGc(context);
+    } else {
+        beginMajorGc(context);
+    }
+
+    runGcUntilIdle(context);
+
+    const std::size_t after = context.objectHeap.size();
+    const std::size_t reclaimed = before > after ? (before - after) : 0;
+    return Value::Int(static_cast<std::int64_t>(reclaimed));
+}
+
+void rememberWriteBarrier(ExecutionContext& context, Object& owner, const Value& assigned) {
+    if (!assigned.isRef()) {
+        return;
+    }
+
+    std::uint64_t ownerId = 0;
+    std::uint64_t targetId = 0;
+    if (!tryGetObjectId(context, &owner, ownerId)) {
+        return;
+    }
+    if (!tryGetObjectId(context, assigned.asRef(), targetId)) {
+        return;
+    }
+
+    auto ownerMetaIt = context.gcMeta.find(ownerId);
+    auto targetMetaIt = context.gcMeta.find(targetId);
+    if (ownerMetaIt == context.gcMeta.end() || targetMetaIt == context.gcMeta.end()) {
+        return;
+    }
+
+    if (ownerMetaIt->second.generation == GcGeneration::Old &&
+        targetMetaIt->second.generation == GcGeneration::Young) {
+        context.gc.rememberedSet.insert(ownerId);
+    }
+}
+
+void registerAllocatedObject(ExecutionContext& context, std::uint64_t id, Object* object) {
+    context.objectPtrToId[object] = id;
+
+    GcObjectMeta meta;
+    meta.regionId = static_cast<std::uint32_t>(id / kRegionSpanObjects);
+    context.gcMeta[id] = meta;
+
+    ++context.gc.allocCountSinceLastCycle;
+    if (context.objectHeap.size() >= context.gc.majorObjectThreshold) {
+        context.gc.requestMajor = true;
+    }
+}
+
 Value emplaceObject(ExecutionContext& context, std::unique_ptr<Object> object) {
     const std::uint64_t id = nextGlobalObjectId();
     object->setObjectId(id);
     Object* rawObject = object.get();
     context.objectHeap.emplace(id, std::move(object));
+    registerAllocatedObject(context, id, rawObject);
     return Value::Ref(rawObject);
 }
 
@@ -174,6 +519,9 @@ public:
         if (!object) {
             throw std::runtime_error("Host object reference not found");
         }
+        if (!context_.objectPtrToId.contains(object)) {
+            throw std::runtime_error("Host object reference is stale");
+        }
         return *object;
     }
 
@@ -194,6 +542,10 @@ public:
             throw std::runtime_error("id() requires valid object reference");
         }
         return object->objectId();
+    }
+
+    Value collectGarbage(std::int64_t generation) override {
+        return collectGarbageNow(context_, generation);
     }
 
 private:
@@ -246,7 +598,9 @@ Value makeModuleObjectValue(ExecutionContext& context,
 Value normalizeRuntimeValue(ExecutionContext& context,
                             FunctionType& functionType,
                             ClassType& classType,
+                            NativeFunctionType& nativeFunctionType,
                             ModuleType& moduleType,
+                            const HostRegistry& hosts,
                             const std::shared_ptr<const Module>& modulePin,
                             const Value& value,
                             bool normalizeStringLiterals) {
@@ -271,6 +625,10 @@ Value normalizeRuntimeValue(ExecutionContext& context,
                                      static_cast<std::size_t>(value.asModuleIndex()));
     }
 
+    if (value.isRef() && value.asRef() != nullptr) {
+        return value;
+    }
+
     if (normalizeStringLiterals && value.isString() && modulePin) {
         const auto stringIndex = static_cast<std::size_t>(value.asStringIndex());
         if (stringIndex >= modulePin->strings.size()) {
@@ -282,14 +640,66 @@ Value normalizeRuntimeValue(ExecutionContext& context,
     return value;
 }
 
+Value resolveRuntimeName(ExecutionContext& context,
+                         FunctionType& functionType,
+                         ClassType& classType,
+                         NativeFunctionType& nativeFunctionType,
+                         ModuleType& moduleType,
+                         const HostRegistry& hosts,
+                         const std::shared_ptr<const Module>& frameModule,
+                         const std::string& name) {
+    if (!frameModule) {
+        throw std::runtime_error("Frame module is null");
+    }
+
+    for (const auto& global : frameModule->globals) {
+        if (global.name == name) {
+            return normalizeRuntimeValue(context,
+                                         functionType,
+                                         classType,
+                                         nativeFunctionType,
+                                         moduleType,
+                                         hosts,
+                                         frameModule,
+                                         global.initialValue,
+                                         true);
+        }
+    }
+
+    for (std::size_t i = 0; i < frameModule->functions.size(); ++i) {
+        if (frameModule->functions[i].name == name) {
+            return makeFunctionObject(context, functionType, i, frameModule);
+        }
+    }
+
+    for (std::size_t i = 0; i < frameModule->classes.size(); ++i) {
+        if (frameModule->classes[i].name == name) {
+            return makeClassObjectValue(context, classType, frameModule, i);
+        }
+    }
+
+    if (hosts.has(name)) {
+        return emplaceObject(context,
+                             std::make_unique<NativeFunctionObject>(nativeFunctionType,
+                                                                    name,
+                                                                    [name, hostsPtr = &hosts](HostContext& hostContext, const std::vector<Value>& callArgs) -> Value {
+                                                                        return hostsPtr->invoke(name, hostContext, callArgs);
+                                                                    }));
+    }
+
+    throw std::runtime_error("Undefined symbol: " + name);
+}
+
 Object& getObjectFromHeap(ExecutionContext& context, const Value& ref) {
     if (!ref.isRef()) {
         throw std::runtime_error("Method target is not an object reference");
     }
-    (void)context;
     Object* object = ref.asRef();
     if (!object) {
         throw std::runtime_error("Object reference not found");
+    }
+    if (!context.objectPtrToId.contains(object)) {
+        throw std::runtime_error("Object reference is stale");
     }
     return *object;
 }
@@ -298,7 +708,9 @@ void initializeInstanceAttributes(const Module& module,
                                   ExecutionContext& context,
                                   FunctionType& functionType,
                                   ClassType& classType,
+                                  NativeFunctionType& nativeFunctionType,
                                   ModuleType& moduleType,
+                                  const HostRegistry& hosts,
                                   const std::shared_ptr<const Module>& modulePin,
                                   std::size_t classIndex,
                                   ScriptInstanceObject& instance);
@@ -306,7 +718,9 @@ void initializeInstanceAttributes(const Module& module,
 Value makeScriptInstance(ExecutionContext& context,
                          FunctionType& functionType,
                          ClassType& classType,
+                         NativeFunctionType& nativeFunctionType,
                          ModuleType& moduleType,
+                         const HostRegistry& hosts,
                          ScriptInstanceType& instanceType,
                          const Module& module,
                          std::shared_ptr<const Module> modulePin,
@@ -330,7 +744,9 @@ Value makeScriptInstance(ExecutionContext& context,
                                  context,
                                  functionType,
                                  classType,
+                                 nativeFunctionType,
                                  moduleType,
+                                 hosts,
                                  instanceModulePin,
                                  classIndex,
                                  *instance);
@@ -359,7 +775,9 @@ void initializeInstanceAttributes(const Module& module,
                                   ExecutionContext& context,
                                   FunctionType& functionType,
                                   ClassType& classType,
+                                  NativeFunctionType& nativeFunctionType,
                                   ModuleType& moduleType,
+                                  const HostRegistry& hosts,
                                   const std::shared_ptr<const Module>& modulePin,
                                   std::size_t classIndex,
                                   ScriptInstanceObject& instance) {
@@ -373,7 +791,9 @@ void initializeInstanceAttributes(const Module& module,
                                      context,
                                      functionType,
                                      classType,
+                                     nativeFunctionType,
                                      moduleType,
+                                     hosts,
                                      modulePin,
                                      static_cast<std::size_t>(cls.baseClassIndex),
                                      instance);
@@ -383,7 +803,9 @@ void initializeInstanceAttributes(const Module& module,
         instance.fields()[attr.name] = normalizeRuntimeValue(context,
                                                              functionType,
                                                              classType,
+                                                             nativeFunctionType,
                                                              moduleType,
+                                                             hosts,
                                                              modulePin,
                                                              attr.defaultValue,
                                                              true);
@@ -442,40 +864,21 @@ Object& VirtualMachine::getObject(ExecutionContext& context, const Value& ref) {
     if (!ref.isRef()) {
         throw std::runtime_error("Method target is not an object reference");
     }
-    (void)context;
     Object* object = ref.asRef();
     if (!object) {
         throw std::runtime_error("Object reference not found");
     }
+    if (!context.objectPtrToId.contains(object)) {
+        throw std::runtime_error("Object reference is stale");
+    }
     return *object;
 }
 
-ExecutionContext VirtualMachine::beginCoroutine(const std::string& functionName,
-                                                const std::vector<Value>& args) {
-    ExecutionContext context;
-    context.modulePin = module_;
-    context.stringPool = module_->strings;
-    pushCallFrame(context, module_, findFunctionIndex(functionName), args);
-    context.state = RunState::Running;
-    return context;
-}
-
-RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudget) {
-    if (context.state == RunState::Completed) {
-        return RunState::Completed;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    if (context.state == RunState::Suspended && now < context.wakeTime) {
-        return RunState::Suspended;
-    }
-    context.state = RunState::Running;
-
+bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) {
     std::size_t steps = 0;
     while (steps++ < stepBudget) {
         if (context.frames.empty()) {
-            context.state = RunState::Completed;
-            return RunState::Completed;
+            return true;
         }
 
         auto& frame = context.frames.back();
@@ -495,18 +898,34 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             Value value = normalizeRuntimeValue(context,
                                                 functionType_,
                                                 classType_,
+                                                nativeFunctionType_,
                                                 moduleType_,
+                                                hosts_,
                                                 frameModule,
                                                 frameModule->constants.at(ins.a),
                                                 true);
             frame.stack.push_back(value);
             break;
         }
+        case OpCode::LoadName: {
+            const auto& symbolName = frameModule->strings.at(ins.a);
+            frame.stack.push_back(resolveRuntimeName(context,
+                                                     functionType_,
+                                                     classType_,
+                                                     nativeFunctionType_,
+                                                     moduleType_,
+                                                     hosts_,
+                                                     frameModule,
+                                                     symbolName));
+            break;
+        }
         case OpCode::LoadLocal:
             frame.stack.push_back(normalizeRuntimeValue(context,
                                                         functionType_,
                                                         classType_,
+                                                        nativeFunctionType_,
                                                         moduleType_,
+                                                        hosts_,
                                                         frameModule,
                                                         frame.locals.at(ins.a),
                                                         false));
@@ -608,7 +1027,9 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             const Value instanceRef = makeScriptInstance(context,
                                                          functionType_,
                                                          classType_,
+                                                         nativeFunctionType_,
                                                          moduleType_,
+                                                         hosts_,
                                                          instanceType_,
                                                          *frameModule,
                                                          frameModule,
@@ -644,7 +1065,9 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                 it->second = normalizeRuntimeValue(context,
                                                    functionType_,
                                                    classType_,
+                                                   nativeFunctionType_,
                                                    moduleType_,
+                                                   hosts_,
                                                    valueModule,
                                                    it->second,
                                                    false);
@@ -663,10 +1086,13 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                             Value globalValue = normalizeRuntimeValue(context,
                                                                       functionType_,
                                                                       classType_,
+                                                                      nativeFunctionType_,
                                                                       moduleType_,
+                                                                      hosts_,
                                                                       modulePin,
                                                                       global.initialValue,
                                                                       true);
+                            rememberWriteBarrier(context, *moduleObj, globalValue);
                             moduleObj->exports()[attrName] = globalValue;
                             frame.stack.push_back(globalValue);
                             goto load_attr_done;
@@ -677,6 +1103,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                         const auto& fn = modulePin->functions[i];
                         if (fn.name == attrName) {
                             Value functionRef = makeFunctionObject(context, functionType_, i, modulePin);
+                            rememberWriteBarrier(context, *moduleObj, functionRef);
                             moduleObj->exports()[attrName] = functionRef;
                             frame.stack.push_back(functionRef);
                             goto load_attr_done;
@@ -691,6 +1118,7 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                                                                                          cls.name,
                                                                                          i,
                                                                                          modulePin));
+                            rememberWriteBarrier(context, *moduleObj, classRef);
                             moduleObj->exports()[attrName] = classRef;
                             frame.stack.push_back(classRef);
                             goto load_attr_done;
@@ -713,14 +1141,18 @@ load_attr_done:
             const Value normalized = normalizeRuntimeValue(context,
                                                            functionType_,
                                                            classType_,
+                                                           nativeFunctionType_,
                                                            moduleType_,
+                                                           hosts_,
                                                            frameModule,
                                                            assigned,
                                                            false);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
+                rememberWriteBarrier(context, *instance, normalized);
                 instance->fields()[attrName] = normalized;
                 frame.stack.push_back(normalized);
             } else {
+                rememberWriteBarrier(context, object, normalized);
                 frame.stack.push_back(object.getType().setMember(object, attrName, normalized));
             }
             break;
@@ -744,6 +1176,82 @@ load_attr_done:
                     throw std::runtime_error("Module object is not loaded: " + moduleObj->moduleName());
                 }
 
+                auto exportIt = moduleObj->exports().find(methodName);
+                if (exportIt != moduleObj->exports().end()) {
+                    const Value callable = normalizeRuntimeValue(context,
+                                                                 functionType_,
+                                                                 classType_,
+                                                                 nativeFunctionType_,
+                                                                 moduleType_,
+                                                                 hosts_,
+                                                                 modulePin,
+                                                                 exportIt->second,
+                                                                 false);
+                    if (!valueEquals(context, exportIt->second, callable)) {
+                        rememberWriteBarrier(context, *moduleObj, callable);
+                        exportIt->second = callable;
+                    }
+
+                    if (!callable.isRef()) {
+                        throw std::runtime_error("Module export is not callable: " + methodName);
+                    }
+
+                    Object& callableObject = getObject(context, callable);
+                    if (auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject)) {
+                        const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : modulePin;
+                        pushCallFrame(context,
+                                      callModule,
+                                      fnObject->functionIndex(),
+                                      args);
+                        goto call_method_done;
+                    }
+
+                    auto* classObject = dynamic_cast<ClassObject*>(&callableObject);
+                    if (classObject) {
+                        const auto& targetModule = classObject->modulePin();
+                        if (!targetModule) {
+                            throw std::runtime_error("Class object is not bound to module: " + classObject->className());
+                        }
+
+                        const std::size_t classIndex = classObject->classIndex();
+                        const Value instanceRef = makeScriptInstance(context,
+                                                                     functionType_,
+                                                                     classType_,
+                                                                     nativeFunctionType_,
+                                                                     moduleType_,
+                                                                     hosts_,
+                                                                     instanceType_,
+                                                                     *targetModule,
+                                                                     targetModule,
+                                                                     classIndex);
+
+                        std::size_t ctorFunctionIndex = 0;
+                        if (!tryFindClassMethodInModule(*targetModule, classIndex, "__new__", ctorFunctionIndex)) {
+                            throw std::runtime_error("Class is missing required constructor __new__: " + classObject->className());
+                        }
+
+                        std::vector<Value> ctorInvokeArgs;
+                        ctorInvokeArgs.reserve(args.size() + 1);
+                        ctorInvokeArgs.push_back(instanceRef);
+                        ctorInvokeArgs.insert(ctorInvokeArgs.end(), args.begin(), args.end());
+                        pushCallFrame(context,
+                                      targetModule,
+                                      ctorFunctionIndex,
+                                      ctorInvokeArgs,
+                                      true,
+                                      instanceRef);
+                        goto call_method_done;
+                    }
+
+                    if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
+                        VmHostContext hostContext(context);
+                        frame.stack.push_back(nativeFunction->invoke(hostContext, args));
+                        goto call_method_done;
+                    }
+
+                    throw std::runtime_error("Module export is not function or class: " + methodName);
+                }
+
                 for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
                     if (modulePin->functions[i].name == methodName) {
                         pushCallFrame(context,
@@ -762,7 +1270,9 @@ load_attr_done:
                     const Value instanceRef = makeScriptInstance(context,
                                                                  functionType_,
                                                                  classType_,
+                                                                 nativeFunctionType_,
                                                                  moduleType_,
+                                                                 hosts_,
                                                                  instanceType_,
                                                                  *modulePin,
                                                                  modulePin,
@@ -789,6 +1299,18 @@ load_attr_done:
                 throw std::runtime_error("Script function not found: " + methodName);
             }
 
+            if (auto* list = dynamic_cast<ListObject*>(&object)) {
+                if (methodName == "push" && !args.empty()) {
+                    rememberWriteBarrier(context, *list, args[0]);
+                } else if (methodName == "set" && args.size() >= 2) {
+                    rememberWriteBarrier(context, *list, args[1]);
+                }
+            } else if (auto* dict = dynamic_cast<DictObject*>(&object)) {
+                if (methodName == "set" && args.size() >= 2) {
+                    rememberWriteBarrier(context, *dict, args[1]);
+                }
+            }
+
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 auto fieldIt = instance->fields().find(methodName);
                 if (fieldIt != instance->fields().end()) {
@@ -796,10 +1318,13 @@ load_attr_done:
                     const Value callable = normalizeRuntimeValue(context,
                                                                  functionType_,
                                                                  classType_,
+                                                                 nativeFunctionType_,
                                                                  moduleType_,
+                                                                 hosts_,
                                                                  callValueModule,
                                                                  fieldIt->second,
                                                                  false);
+                    rememberWriteBarrier(context, *instance, callable);
                     fieldIt->second = callable;
                     if (!callable.isRef()) {
                         throw std::runtime_error("Object property is not callable: " + methodName);
@@ -854,7 +1379,9 @@ call_method_done:
             callable = normalizeRuntimeValue(context,
                                              functionType_,
                                              classType_,
+                                             nativeFunctionType_,
                                              moduleType_,
+                                             hosts_,
                                              frameModule,
                                              callable,
                                              false);
@@ -884,7 +1411,9 @@ call_method_done:
                 const Value instanceRef = makeScriptInstance(context,
                                                              functionType_,
                                                              classType_,
+                                                             nativeFunctionType_,
                                                              moduleType_,
+                                                             hosts_,
                                                              instanceType_,
                                                              *targetModule,
                                                              targetModule,
@@ -905,6 +1434,12 @@ call_method_done:
                               ctorInvokeArgs,
                               true,
                               instanceRef);
+                break;
+            }
+
+            if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
+                VmHostContext hostContext(context);
+                frame.stack.push_back(nativeFunction->invoke(hostContext, args));
                 break;
             }
 
@@ -951,13 +1486,11 @@ call_method_done:
             break;
         }
         case OpCode::Sleep:
-            context.state = RunState::Suspended;
-            context.wakeTime = std::chrono::steady_clock::now() + std::chrono::milliseconds(ins.a);
-            return RunState::Suspended;
+            std::this_thread::sleep_for(std::chrono::milliseconds(ins.a));
+            break;
         case OpCode::Yield:
-            context.state = RunState::Suspended;
-            context.wakeTime = std::chrono::steady_clock::now();
-            return RunState::Suspended;
+            std::this_thread::yield();
+            break;
         case OpCode::Return: {
             Value ret = frame.stack.empty() ? Value::Nil() : popValue(frame.stack);
             if (frame.replaceReturnWithInstance) {
@@ -966,8 +1499,7 @@ call_method_done:
             context.frames.pop_back();
             if (context.frames.empty()) {
                 context.returnValue = ret;
-                context.state = RunState::Completed;
-                return RunState::Completed;
+                return true;
             }
             context.frames.back().stack.push_back(ret);
             break;
@@ -976,26 +1508,24 @@ call_method_done:
             (void)popValue(frame.stack);
             break;
         }
+
+        runGcSlice(context, context.gc.sliceBudgetObjects);
     }
 
-    return context.state;
+    return context.frames.empty();
 }
 
 Value VirtualMachine::runFunction(const std::string& functionName, const std::vector<Value>& args) {
-    ExecutionContext ctx = beginCoroutine(functionName, args);
-    while (true) {
-        const auto state = resume(ctx, 1000);
-        if (state == RunState::Completed) {
-            runDeleteHooks(ctx);
-            return ctx.returnValue;
-        }
-        if (state == RunState::Suspended) {
-            const auto now = std::chrono::steady_clock::now();
-            if (ctx.wakeTime > now) {
-                std::this_thread::sleep_for(ctx.wakeTime - now);
-            }
-        }
+    ExecutionContext ctx;
+    ctx.modulePin = module_;
+    ctx.stringPool = module_->strings;
+    pushCallFrame(ctx, module_, findFunctionIndex(functionName), args);
+
+    while (!execute(ctx, 1000)) {
     }
+
+    runDeleteHooks(ctx);
+    return ctx.returnValue;
 }
 
 void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
@@ -1040,23 +1570,12 @@ void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
             continue;
         }
 
-        context.state = RunState::Running;
         pushCallFrame(context,
                       task.modulePin,
                       deleteFunctionIndex,
                       {task.objectRef});
 
-        while (true) {
-            const auto state = resume(context, 1000);
-            if (state == RunState::Completed) {
-                break;
-            }
-            if (state == RunState::Suspended) {
-                const auto now = std::chrono::steady_clock::now();
-                if (context.wakeTime > now) {
-                    std::this_thread::sleep_for(context.wakeTime - now);
-                }
-            }
+        while (!execute(context, 1000)) {
         }
     }
 }

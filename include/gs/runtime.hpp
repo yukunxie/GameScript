@@ -24,8 +24,6 @@ public:
     bool hotReloadSource(const std::string& path);
 
     Value call(const std::string& functionName, const std::vector<Value>& args = {});
-    ExecutionContext startCoroutine(const std::string& functionName, const std::vector<Value>& args = {});
-    RunState resumeCoroutine(ExecutionContext& context, std::size_t budget = 200);
 
     bool saveBytecode(const std::string& path) const;
 
