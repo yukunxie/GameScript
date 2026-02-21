@@ -343,16 +343,81 @@ std::int32_t addString(Module& module, const std::string& value);
 
 Value evalClassFieldInit(const Expr& expr,
                         Module& module,
-                        const std::unordered_map<std::string, std::size_t>& funcIndex) {
+                        const std::unordered_map<std::string, std::size_t>& funcIndex,
+                        const std::unordered_map<std::string, std::size_t>& classIndex);
+
+bool resolveNamedValue(const Module& module,
+                       const std::unordered_map<std::string, std::size_t>& funcIndex,
+                       const std::unordered_map<std::string, std::size_t>& classIndex,
+                       const std::string& name,
+                       Value& outValue) {
+    for (const auto& global : module.globals) {
+        if (global.name == name) {
+            outValue = global.initialValue;
+            return true;
+        }
+    }
+
+    auto functionIt = funcIndex.find(name);
+    if (functionIt != funcIndex.end()) {
+        outValue = Value::Function(static_cast<std::int64_t>(functionIt->second));
+        return true;
+    }
+
+    auto classIt = classIndex.find(name);
+    if (classIt != classIndex.end()) {
+        outValue = Value::Class(static_cast<std::int64_t>(classIt->second));
+        return true;
+    }
+
+    return false;
+}
+
+struct SymbolLookupResult {
+    bool found{false};
+    bool isLocal{false};
+    std::size_t localSlot{0};
+    Value value{Value::Nil()};
+};
+
+SymbolLookupResult resolveSymbol(const std::unordered_map<std::string, std::size_t>& locals,
+                                 const Module& module,
+                                 const std::unordered_map<std::string, std::size_t>& funcIndex,
+                                 const std::unordered_map<std::string, std::size_t>& classIndex,
+                                 const std::string& name) {
+    SymbolLookupResult result;
+
+    auto localIt = locals.find(name);
+    if (localIt != locals.end()) {
+        result.found = true;
+        result.isLocal = true;
+        result.localSlot = localIt->second;
+        return result;
+    }
+
+    Value namedValue = Value::Nil();
+    if (resolveNamedValue(module, funcIndex, classIndex, name, namedValue)) {
+        result.found = true;
+        result.value = namedValue;
+        return result;
+    }
+
+    return result;
+}
+
+Value evalClassFieldInit(const Expr& expr,
+                        Module& module,
+                        const std::unordered_map<std::string, std::size_t>& funcIndex,
+                        const std::unordered_map<std::string, std::size_t>& classIndex) {
     switch (expr.type) {
     case ExprType::Number:
         return expr.value;
     case ExprType::StringLiteral:
         return Value::String(addString(module, expr.stringLiteral));
     case ExprType::Variable: {
-        auto it = funcIndex.find(expr.name);
-        if (it != funcIndex.end()) {
-            return Value::Function(static_cast<std::int64_t>(it->second));
+        Value namedValue = Value::Nil();
+        if (resolveNamedValue(module, funcIndex, classIndex, expr.name, namedValue)) {
+            return namedValue;
         }
         break;
     }
@@ -360,21 +425,22 @@ Value evalClassFieldInit(const Expr& expr,
         break;
     }
 
-    throw std::runtime_error("Class field initializer must be number/string/function name");
+    throw std::runtime_error("Class field initializer must be number/string/symbol name");
 }
 
 Value evalGlobalInit(const Expr& expr,
                     Module& module,
-                    const std::unordered_map<std::string, std::size_t>& funcIndex) {
+                    const std::unordered_map<std::string, std::size_t>& funcIndex,
+                    const std::unordered_map<std::string, std::size_t>& classIndex) {
     switch (expr.type) {
     case ExprType::Number:
         return expr.value;
     case ExprType::StringLiteral:
         return Value::String(addString(module, expr.stringLiteral));
     case ExprType::Variable: {
-        auto it = funcIndex.find(expr.name);
-        if (it != funcIndex.end()) {
-            return Value::Function(static_cast<std::int64_t>(it->second));
+        Value namedValue = Value::Nil();
+        if (resolveNamedValue(module, funcIndex, classIndex, expr.name, namedValue)) {
+            return namedValue;
         }
         break;
     }
@@ -382,7 +448,7 @@ Value evalGlobalInit(const Expr& expr,
         break;
     }
 
-    throw std::runtime_error("Top-level let initializer must be number/string/function name");
+    throw std::runtime_error("Top-level let initializer must be number/string/symbol name");
 }
 
 std::int32_t addConstant(Module& module, Value value) {
@@ -443,32 +509,25 @@ void compileExpr(const Expr& expr,
              0);
         return;
     case ExprType::Variable: {
-        auto it = locals.find(expr.name);
-        if (it != locals.end()) {
-            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(it->second), 0);
+        const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                          module,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          expr.name);
+        if (!resolved.found) {
+            throw std::runtime_error("Undefined variable: " + expr.name);
+        }
+
+        if (resolved.isLocal) {
+            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
             return;
         }
 
-        for (const auto& global : module.globals) {
-            if (global.name == expr.name) {
-                emit(code,
-                     OpCode::PushConst,
-                     addConstant(module, global.initialValue),
-                     0);
-                return;
-            }
-        }
-
-        auto fit = funcIndex.find(expr.name);
-        if (fit != funcIndex.end()) {
-            emit(code,
-                 OpCode::PushConst,
-                 addConstant(module, Value::Function(static_cast<std::int64_t>(fit->second))),
-                 0);
-            return;
-        }
-
-        throw std::runtime_error("Undefined variable: " + expr.name);
+        emit(code,
+             OpCode::PushConst,
+             addConstant(module, resolved.value),
+             0);
+        return;
     }
     case ExprType::AssignProperty:
         if (!expr.object || !expr.right) {
@@ -545,33 +604,36 @@ void compileExpr(const Expr& expr,
 
         if (expr.callee->type == ExprType::Variable) {
             const std::string& calleeName = expr.callee->name;
-            const bool isLocal = locals.find(calleeName) != locals.end();
-            auto fit = funcIndex.find(calleeName);
-            auto classIt = classIndex.find(calleeName);
 
-            if (classIt != classIndex.end()) {
+            const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                              module,
+                                                              funcIndex,
+                                                              classIndex,
+                                                              calleeName);
+
+            if (resolved.found && !resolved.isLocal && resolved.value.isClass()) {
                 for (const auto& arg : expr.args) {
                     compileExpr(arg, module, locals, funcIndex, classIndex, code);
                 }
                 emit(code,
                      OpCode::NewInstance,
-                     static_cast<std::int32_t>(classIt->second),
+                     static_cast<std::int32_t>(resolved.value.asClassIndex()),
                      static_cast<std::int32_t>(expr.args.size()));
                 return;
             }
 
-            if (!isLocal && fit != funcIndex.end()) {
+            if (resolved.found && !resolved.isLocal && resolved.value.isFunction()) {
                 for (const auto& arg : expr.args) {
                     compileExpr(arg, module, locals, funcIndex, classIndex, code);
                 }
                 emit(code,
                      OpCode::CallFunc,
-                     static_cast<std::int32_t>(fit->second),
+                     static_cast<std::int32_t>(resolved.value.asFunctionIndex()),
                      static_cast<std::int32_t>(expr.args.size()));
                 return;
             }
 
-            if (!isLocal && fit == funcIndex.end()) {
+            if (!resolved.found) {
                 for (const auto& arg : expr.args) {
                     compileExpr(arg, module, locals, funcIndex, classIndex, code);
                 }
@@ -891,20 +953,6 @@ Module Compiler::compile(const Program& program) {
         module.classes.push_back(std::move(classBc));
     }
 
-    for (const auto& stmt : program.topLevelLets) {
-        bool exists = false;
-        for (const auto& g : module.globals) {
-            if (g.name == stmt.name) {
-                exists = true;
-                break;
-            }
-        }
-        if (exists) {
-            throw std::runtime_error("Duplicate top-level variable name: " + stmt.name);
-        }
-        module.globals.push_back({stmt.name, evalGlobalInit(stmt.expr, module, funcIndex)});
-    }
-
     for (const auto& fn : program.functions) {
         if (funcIndex.contains(fn.name)) {
             throw std::runtime_error("Duplicate function name: " + fn.name);
@@ -918,6 +966,25 @@ Module Compiler::compile(const Program& program) {
         module.functions.push_back(std::move(compiled));
     }
 
+    for (const auto& stmt : program.topLevelLets) {
+        if (funcIndex.contains(stmt.name) || classIndex.contains(stmt.name)) {
+            throw std::runtime_error("Duplicate top-level symbol name: " + stmt.name);
+        }
+
+        bool exists = false;
+        for (const auto& g : module.globals) {
+            if (g.name == stmt.name) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) {
+            throw std::runtime_error("Duplicate top-level variable name: " + stmt.name);
+        }
+
+        module.globals.push_back({stmt.name, evalGlobalInit(stmt.expr, module, funcIndex, classIndex)});
+    }
+
     for (const auto& cls : program.classes) {
         auto& classBc = module.classes[classIndex.at(cls.name)];
         if (!cls.baseName.empty()) {
@@ -929,7 +996,7 @@ Module Compiler::compile(const Program& program) {
         }
 
         for (const auto& attr : cls.attributes) {
-            classBc.attributes.push_back({attr.name, evalClassFieldInit(attr.initializer, module, funcIndex)});
+            classBc.attributes.push_back({attr.name, evalClassFieldInit(attr.initializer, module, funcIndex, classIndex)});
         }
 
         bool hasCtor = false;
@@ -1167,25 +1234,30 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
     out << "    gs::Module m;\n";
 
     for (auto c : module.constants) {
-        out << "    m.constants.push_back(gs::Value{gs::ValueType::";
+        out << "    m.constants.push_back(";
         switch (c.type) {
         case ValueType::Nil:
-            out << "Nil";
+            out << "gs::Value::Nil()";
             break;
         case ValueType::Int:
-            out << "Int";
+            out << "gs::Value::Int(" << c.payload << ")";
             break;
         case ValueType::String:
-            out << "String";
+            out << "gs::Value::String(" << c.payload << ")";
             break;
         case ValueType::Ref:
-            out << "Ref";
-            break;
+            throw std::runtime_error("AOT generation does not support runtime Ref values in constants");
         case ValueType::Function:
-            out << "Function";
+            out << "gs::Value::Function(" << c.payload << ")";
+            break;
+        case ValueType::Class:
+            out << "gs::Value::Class(" << c.payload << ")";
+            break;
+        case ValueType::Module:
+            out << "gs::Value::Module(" << c.payload << ")";
             break;
         }
-        out << ", " << c.payload << "});\n";
+        out << ");\n";
     }
     for (const auto& s : module.strings) {
         out << "    m.strings.push_back(" << std::quoted(s) << ");\n";
@@ -1247,25 +1319,31 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
         out << "        c.baseClassIndex = " << cls.baseClassIndex << ";\n";
         for (const auto& attr : cls.attributes) {
             out << "        c.attributes.push_back(gs::ClassAttributeBinding{" << std::quoted(attr.name)
-                << ", gs::Value{gs::ValueType::";
+                << ", ";
             switch (attr.defaultValue.type) {
             case ValueType::Nil:
-                out << "Nil";
+                out << "gs::Value::Nil()";
                 break;
             case ValueType::Int:
-                out << "Int";
+                out << "gs::Value::Int(" << attr.defaultValue.payload << ")";
                 break;
             case ValueType::String:
-                out << "String";
+                out << "gs::Value::String(" << attr.defaultValue.payload << ")";
                 break;
             case ValueType::Ref:
-                out << "Ref";
+                throw std::runtime_error("AOT generation does not support runtime Ref values in class attributes");
                 break;
             case ValueType::Function:
-                out << "Function";
+                out << "gs::Value::Function(" << attr.defaultValue.payload << ")";
+                break;
+            case ValueType::Class:
+                out << "gs::Value::Class(" << attr.defaultValue.payload << ")";
+                break;
+            case ValueType::Module:
+                out << "gs::Value::Module(" << attr.defaultValue.payload << ")";
                 break;
             }
-            out << ", " << attr.defaultValue.payload << "}});\n";
+            out << "});\n";
         }
         for (const auto& method : cls.methods) {
             out << "        c.methods.push_back(gs::ClassMethodBinding{" << std::quoted(method.name)
@@ -1277,25 +1355,31 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
 
     for (const auto& global : module.globals) {
         out << "    m.globals.push_back(gs::GlobalBinding{" << std::quoted(global.name)
-            << ", gs::Value{gs::ValueType::";
+            << ", ";
         switch (global.initialValue.type) {
         case ValueType::Nil:
-            out << "Nil";
+            out << "gs::Value::Nil()";
             break;
         case ValueType::Int:
-            out << "Int";
+            out << "gs::Value::Int(" << global.initialValue.payload << ")";
             break;
         case ValueType::String:
-            out << "String";
+            out << "gs::Value::String(" << global.initialValue.payload << ")";
             break;
         case ValueType::Ref:
-            out << "Ref";
+            throw std::runtime_error("AOT generation does not support runtime Ref values in globals");
             break;
         case ValueType::Function:
-            out << "Function";
+            out << "gs::Value::Function(" << global.initialValue.payload << ")";
+            break;
+        case ValueType::Class:
+            out << "gs::Value::Class(" << global.initialValue.payload << ")";
+            break;
+        case ValueType::Module:
+            out << "gs::Value::Module(" << global.initialValue.payload << ")";
             break;
         }
-        out << ", " << global.initialValue.payload << "}});\n";
+        out << "});\n";
     }
 
     out << "    return m;\n";

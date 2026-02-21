@@ -43,6 +43,7 @@ private:
     Value methodSet(Object& self, const std::vector<Value>& args) const;
     Value methodRemove(Object& self, const std::vector<Value>& args) const;
     Value methodSize(Object& self, const std::vector<Value>& args) const;
+    Value methodSort(Object& self, const std::vector<Value>& args) const;
     Value memberLengthGet(Object& self) const;
     Value memberLengthSet(Object& self, const Value& value) const;
 };

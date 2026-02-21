@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <atomic>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -50,47 +49,32 @@ std::uint64_t nextGlobalObjectId() {
     return nextId.fetch_add(1, std::memory_order_relaxed);
 }
 
-std::uint64_t toObjectId(const Value& ref) {
-    const std::int64_t rawId = ref.asRef();
-    if (rawId < 0) {
-        throw std::runtime_error("Object reference id is negative");
-    }
-    return static_cast<std::uint64_t>(rawId);
-}
-
-Value makeRefValue(std::uint64_t objectId) {
-    constexpr auto kMaxRefId = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-    if (objectId > kMaxRefId) {
-        throw std::runtime_error("Object reference id overflow");
-    }
-    return Value::Ref(static_cast<std::int64_t>(objectId));
-}
-
 Value emplaceObject(ExecutionContext& context, std::unique_ptr<Object> object) {
     const std::uint64_t id = nextGlobalObjectId();
     object->setObjectId(id);
+    Object* rawObject = object.get();
     context.objectHeap.emplace(id, std::move(object));
-    return makeRefValue(id);
+    return Value::Ref(rawObject);
 }
 
 std::string __str__RefObject(const ExecutionContext& context,
-                             std::uint64_t objectId,
+                             Object* object,
                              std::unordered_set<std::uint64_t>& visitingRefs) {
-    auto it = context.objectHeap.find(objectId);
-    if (it == context.objectHeap.end() || !it->second) {
-        return "ref(" + std::to_string(objectId) + ")";
+    if (!object) {
+        return "ref(null)";
     }
+
+    const std::uint64_t objectId = object->objectId();
 
     if (visitingRefs.contains(objectId)) {
         return "[Circular]";
     }
 
     visitingRefs.insert(objectId);
-    Object& object = *(it->second);
     const auto valueStr = [&](const Value& nested) {
         return __str__ValueImpl(context, nested, visitingRefs);
     };
-    std::string out = object.getType().__str__(object, valueStr);
+    std::string out = object->getType().__str__(*object, valueStr);
 
     visitingRefs.erase(objectId);
     return out;
@@ -103,13 +87,17 @@ std::string __str__ValueImpl(const ExecutionContext& context,
     case ValueType::Nil:
         return "nil";
     case ValueType::Int:
-        return std::to_string(value.payload);
+        return std::to_string(value.asInt());
     case ValueType::String:
         return getString(context, value);
     case ValueType::Ref:
-        return __str__RefObject(context, toObjectId(value), visitingRefs);
+        return __str__RefObject(context, value.asRef(), visitingRefs);
     case ValueType::Function:
         return "[Function]";
+    case ValueType::Class:
+        return "[Class]";
+    case ValueType::Module:
+        return "[Module]";
     }
     return "";
 }
@@ -129,21 +117,23 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
         return "string";
     case ValueType::Function:
         return "function";
+    case ValueType::Class:
+        return "class";
+    case ValueType::Module:
+        return "module";
     case ValueType::Ref:
         break;
     }
 
-    const auto objectId = toObjectId(value);
-    auto it = context.objectHeap.find(objectId);
-    if (it == context.objectHeap.end() || !it->second) {
+    Object* object = value.asRef();
+    if (!object) {
         return "ref";
     }
 
-    Object& object = *(it->second);
-    if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
+    if (auto* instance = dynamic_cast<ScriptInstanceObject*>(object)) {
         return instance->className();
     }
-    return object.getType().name();
+    return object->getType().name();
 }
 
 Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
@@ -157,6 +147,9 @@ bool valueEquals(const ExecutionContext& context, const Value& lhs, const Value&
     }
     if (lhs.type == ValueType::String) {
         return getString(context, lhs) == getString(context, rhs);
+    }
+    if (lhs.type == ValueType::Ref) {
+        return lhs.asRef() == rhs.asRef();
     }
     return lhs.payload == rhs.payload;
 }
@@ -177,12 +170,11 @@ public:
         if (!ref.isRef()) {
             throw std::runtime_error("Host context expects object reference");
         }
-        const std::uint64_t objectId = toObjectId(ref);
-        auto it = context_.objectHeap.find(objectId);
-        if (it == context_.objectHeap.end() || !it->second) {
+        Object* object = ref.asRef();
+        if (!object) {
             throw std::runtime_error("Host object reference not found");
         }
-        return *(it->second);
+        return *object;
     }
 
     std::string __str__(const Value& value) override {
@@ -197,7 +189,11 @@ public:
         if (!ref.isRef()) {
             throw std::runtime_error("id() requires object reference");
         }
-        return toObjectId(ref);
+        Object* object = ref.asRef();
+        if (!object) {
+            throw std::runtime_error("id() requires valid object reference");
+        }
+        return object->objectId();
     }
 
 private:
@@ -211,22 +207,49 @@ Value makeFunctionObject(ExecutionContext& context,
     return emplaceObject(context, std::make_unique<FunctionObject>(functionType, functionIndex, std::move(modulePin)));
 }
 
-Value normalizeFunctionValue(ExecutionContext& context,
-                             FunctionType& functionType,
-                             const Value& value) {
-    if (!value.isFunction()) {
-        return value;
+Value makeClassObjectValue(ExecutionContext& context,
+                           ClassType& classType,
+                           const std::shared_ptr<const Module>& modulePin,
+                           std::size_t classIndex) {
+    if (!modulePin) {
+        throw std::runtime_error("Class value is missing module binding");
     }
-    return makeFunctionObject(context,
-                              functionType,
-                              static_cast<std::size_t>(value.asFunctionIndex()),
-                              context.modulePin);
+    if (classIndex >= modulePin->classes.size()) {
+        throw std::runtime_error("Class index out of range");
+    }
+
+    return emplaceObject(context,
+                         std::make_unique<ClassObject>(classType,
+                                                       modulePin->classes[classIndex].name,
+                                                       classIndex,
+                                                       modulePin));
 }
 
-Value normalizeModuleValue(ExecutionContext& context,
-                           FunctionType& functionType,
-                           const std::shared_ptr<const Module>& modulePin,
-                           const Value& value) {
+Value makeModuleObjectValue(ExecutionContext& context,
+                            ModuleType& moduleType,
+                            const std::shared_ptr<const Module>& modulePin,
+                            std::size_t moduleNameIndex) {
+    if (!modulePin) {
+        throw std::runtime_error("Module value is missing module binding");
+    }
+    if (moduleNameIndex >= modulePin->strings.size()) {
+        throw std::runtime_error("Module string index out of range");
+    }
+
+    const std::string& moduleName = modulePin->strings[moduleNameIndex];
+    return emplaceObject(context,
+                         std::make_unique<ModuleObject>(moduleType,
+                                                        moduleName,
+                                                        modulePin));
+}
+
+Value normalizeRuntimeValue(ExecutionContext& context,
+                            FunctionType& functionType,
+                            ClassType& classType,
+                            ModuleType& moduleType,
+                            const std::shared_ptr<const Module>& modulePin,
+                            const Value& value,
+                            bool normalizeStringLiterals) {
     if (value.isFunction()) {
         return makeFunctionObject(context,
                                   functionType,
@@ -234,7 +257,21 @@ Value normalizeModuleValue(ExecutionContext& context,
                                   modulePin);
     }
 
-    if (value.isString() && modulePin) {
+    if (value.isClass()) {
+        return makeClassObjectValue(context,
+                                    classType,
+                                    modulePin,
+                                    static_cast<std::size_t>(value.asClassIndex()));
+    }
+
+    if (value.isModule()) {
+        return makeModuleObjectValue(context,
+                                     moduleType,
+                                     modulePin,
+                                     static_cast<std::size_t>(value.asModuleIndex()));
+    }
+
+    if (normalizeStringLiterals && value.isString() && modulePin) {
         const auto stringIndex = static_cast<std::size_t>(value.asStringIndex());
         if (stringIndex >= modulePin->strings.size()) {
             throw std::runtime_error("String index out of range");
@@ -249,22 +286,27 @@ Object& getObjectFromHeap(ExecutionContext& context, const Value& ref) {
     if (!ref.isRef()) {
         throw std::runtime_error("Method target is not an object reference");
     }
-    auto it = context.objectHeap.find(toObjectId(ref));
-    if (it == context.objectHeap.end() || !it->second) {
+    (void)context;
+    Object* object = ref.asRef();
+    if (!object) {
         throw std::runtime_error("Object reference not found");
     }
-    return *(it->second);
+    return *object;
 }
 
 void initializeInstanceAttributes(const Module& module,
                                   ExecutionContext& context,
                                   FunctionType& functionType,
+                                  ClassType& classType,
+                                  ModuleType& moduleType,
                                   const std::shared_ptr<const Module>& modulePin,
                                   std::size_t classIndex,
                                   ScriptInstanceObject& instance);
 
 Value makeScriptInstance(ExecutionContext& context,
                          FunctionType& functionType,
+                         ClassType& classType,
+                         ModuleType& moduleType,
                          ScriptInstanceType& instanceType,
                          const Module& module,
                          std::shared_ptr<const Module> modulePin,
@@ -287,6 +329,8 @@ Value makeScriptInstance(ExecutionContext& context,
     initializeInstanceAttributes(module,
                                  context,
                                  functionType,
+                                 classType,
+                                 moduleType,
                                  instanceModulePin,
                                  classIndex,
                                  *instance);
@@ -314,6 +358,8 @@ bool tryFindClassMethodInModule(const Module& module,
 void initializeInstanceAttributes(const Module& module,
                                   ExecutionContext& context,
                                   FunctionType& functionType,
+                                  ClassType& classType,
+                                  ModuleType& moduleType,
                                   const std::shared_ptr<const Module>& modulePin,
                                   std::size_t classIndex,
                                   ScriptInstanceObject& instance) {
@@ -326,16 +372,21 @@ void initializeInstanceAttributes(const Module& module,
         initializeInstanceAttributes(module,
                                      context,
                                      functionType,
+                                     classType,
+                                     moduleType,
                                      modulePin,
                                      static_cast<std::size_t>(cls.baseClassIndex),
                                      instance);
     }
 
     for (const auto& attr : cls.attributes) {
-        instance.fields()[attr.name] = normalizeModuleValue(context,
-                                                            functionType,
-                                                            modulePin,
-                                                            attr.defaultValue);
+        instance.fields()[attr.name] = normalizeRuntimeValue(context,
+                                                             functionType,
+                                                             classType,
+                                                             moduleType,
+                                                             modulePin,
+                                                             attr.defaultValue,
+                                                             true);
     }
 }
 
@@ -391,11 +442,12 @@ Object& VirtualMachine::getObject(ExecutionContext& context, const Value& ref) {
     if (!ref.isRef()) {
         throw std::runtime_error("Method target is not an object reference");
     }
-    auto it = context.objectHeap.find(toObjectId(ref));
-    if (it == context.objectHeap.end() || !it->second) {
+    (void)context;
+    Object* object = ref.asRef();
+    if (!object) {
         throw std::runtime_error("Object reference not found");
     }
-    return *(it->second);
+    return *object;
 }
 
 ExecutionContext VirtualMachine::beginCoroutine(const std::string& functionName,
@@ -440,15 +492,24 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
         const Instruction ins = fn.code[frame.ip++];
         switch (ins.op) {
         case OpCode::PushConst: {
-            Value value = normalizeModuleValue(context,
-                                               functionType_,
-                                               frameModule,
-                                               frameModule->constants.at(ins.a));
+            Value value = normalizeRuntimeValue(context,
+                                                functionType_,
+                                                classType_,
+                                                moduleType_,
+                                                frameModule,
+                                                frameModule->constants.at(ins.a),
+                                                true);
             frame.stack.push_back(value);
             break;
         }
         case OpCode::LoadLocal:
-            frame.stack.push_back(normalizeFunctionValue(context, functionType_, frame.locals.at(ins.a)));
+            frame.stack.push_back(normalizeRuntimeValue(context,
+                                                        functionType_,
+                                                        classType_,
+                                                        moduleType_,
+                                                        frameModule,
+                                                        frame.locals.at(ins.a),
+                                                        false));
             break;
         case OpCode::StoreLocal: {
             const Value v = popValue(frame.stack);
@@ -546,6 +607,8 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
             const std::size_t classIndex = static_cast<std::size_t>(ins.a);
             const Value instanceRef = makeScriptInstance(context,
                                                          functionType_,
+                                                         classType_,
+                                                         moduleType_,
                                                          instanceType_,
                                                          *frameModule,
                                                          frameModule,
@@ -577,7 +640,14 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                 if (it == instance->fields().end()) {
                     throw std::runtime_error("Unknown class attribute: " + attrName);
                 }
-                it->second = normalizeFunctionValue(context, functionType_, it->second);
+                const auto valueModule = instance->modulePin() ? instance->modulePin() : frameModule;
+                it->second = normalizeRuntimeValue(context,
+                                                   functionType_,
+                                                   classType_,
+                                                   moduleType_,
+                                                   valueModule,
+                                                   it->second,
+                                                   false);
                 frame.stack.push_back(it->second);
             } else if (auto* moduleObj = dynamic_cast<ModuleObject*>(&object)) {
                 auto exportIt = moduleObj->exports().find(attrName);
@@ -590,10 +660,13 @@ RunState VirtualMachine::resume(ExecutionContext& context, std::size_t stepBudge
                 if (modulePin) {
                     for (const auto& global : modulePin->globals) {
                         if (global.name == attrName) {
-                            Value globalValue = normalizeModuleValue(context,
-                                                                     functionType_,
-                                                                     modulePin,
-                                                                     global.initialValue);
+                            Value globalValue = normalizeRuntimeValue(context,
+                                                                      functionType_,
+                                                                      classType_,
+                                                                      moduleType_,
+                                                                      modulePin,
+                                                                      global.initialValue,
+                                                                      true);
                             moduleObj->exports()[attrName] = globalValue;
                             frame.stack.push_back(globalValue);
                             goto load_attr_done;
@@ -637,7 +710,13 @@ load_attr_done:
             const Value selfRef = popValue(frame.stack);
             Object& object = getObject(context, selfRef);
             const auto& attrName = frameModule->strings.at(ins.a);
-            const Value normalized = normalizeFunctionValue(context, functionType_, assigned);
+            const Value normalized = normalizeRuntimeValue(context,
+                                                           functionType_,
+                                                           classType_,
+                                                           moduleType_,
+                                                           frameModule,
+                                                           assigned,
+                                                           false);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 instance->fields()[attrName] = normalized;
                 frame.stack.push_back(normalized);
@@ -682,6 +761,8 @@ load_attr_done:
 
                     const Value instanceRef = makeScriptInstance(context,
                                                                  functionType_,
+                                                                 classType_,
+                                                                 moduleType_,
                                                                  instanceType_,
                                                                  *modulePin,
                                                                  modulePin,
@@ -711,7 +792,14 @@ load_attr_done:
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 auto fieldIt = instance->fields().find(methodName);
                 if (fieldIt != instance->fields().end()) {
-                    const Value callable = normalizeFunctionValue(context, functionType_, fieldIt->second);
+                    const auto callValueModule = instance->modulePin() ? instance->modulePin() : frameModule;
+                    const Value callable = normalizeRuntimeValue(context,
+                                                                 functionType_,
+                                                                 classType_,
+                                                                 moduleType_,
+                                                                 callValueModule,
+                                                                 fieldIt->second,
+                                                                 false);
                     fieldIt->second = callable;
                     if (!callable.isRef()) {
                         throw std::runtime_error("Object property is not callable: " + methodName);
@@ -763,7 +851,13 @@ call_method_done:
         case OpCode::CallValue: {
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.a));
             Value callable = popValue(frame.stack);
-            callable = normalizeFunctionValue(context, functionType_, callable);
+            callable = normalizeRuntimeValue(context,
+                                             functionType_,
+                                             classType_,
+                                             moduleType_,
+                                             frameModule,
+                                             callable,
+                                             false);
             if (!callable.isRef()) {
                 throw std::runtime_error("Attempted to call a non-function value");
             }
@@ -789,6 +883,8 @@ call_method_done:
                 const std::size_t classIndex = classObject->classIndex();
                 const Value instanceRef = makeScriptInstance(context,
                                                              functionType_,
+                                                             classType_,
+                                                             moduleType_,
                                                              instanceType_,
                                                              *targetModule,
                                                              targetModule,
@@ -909,7 +1005,7 @@ void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
     context.deleteHooksRan = true;
 
     struct DeleteTask {
-        std::uint64_t objectId{0};
+        Value objectRef{Value::Nil()};
         std::size_t classIndex{0};
         std::shared_ptr<const Module> modulePin;
     };
@@ -928,12 +1024,11 @@ void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
         if (!modulePin) {
             continue;
         }
-        tasks.push_back({objectId, instance->classIndex(), modulePin});
+        tasks.push_back({Value::Ref(objectPtr.get()), instance->classIndex(), modulePin});
     }
 
     for (const auto& task : tasks) {
-        auto it = context.objectHeap.find(task.objectId);
-        if (it == context.objectHeap.end() || !it->second) {
+        if (!task.objectRef.isRef() || task.objectRef.asRef() == nullptr) {
             continue;
         }
 
@@ -949,7 +1044,7 @@ void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
         pushCallFrame(context,
                       task.modulePin,
                       deleteFunctionIndex,
-                      {makeRefValue(task.objectId)});
+                      {task.objectRef});
 
         while (true) {
             const auto state = resume(context, 1000);

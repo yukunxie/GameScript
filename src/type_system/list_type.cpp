@@ -1,5 +1,6 @@
 #include "gs/type_system/list_type.hpp"
 
+#include <algorithm>
 #include <sstream>
 #include <stdexcept>
 
@@ -38,6 +39,7 @@ ListType::ListType() {
     registerMethod("set", 2, &ListType::methodSet);
     registerMethod("remove", 1, &ListType::methodRemove);
     registerMethod("size", 0, &ListType::methodSize);
+    registerMethod("sort", 0, &ListType::methodSort);
 
     registerMemberAttribute(
         "length",
@@ -129,6 +131,22 @@ Value ListType::methodSize(Object& self, const std::vector<Value>& args) const {
     auto& list = requireList(self);
     (void)args;
     return Value::Int(static_cast<std::int64_t>(list.data().size()));
+}
+
+Value ListType::methodSort(Object& self, const std::vector<Value>& args) const {
+    auto& list = requireList(self);
+    (void)args;
+
+    for (const auto& item : list.data()) {
+        if (!item.isInt()) {
+            throw std::runtime_error("List.sort currently supports integer elements only");
+        }
+    }
+
+    std::sort(list.data().begin(), list.data().end(), [](const Value& lhs, const Value& rhs) {
+        return lhs.asInt() < rhs.asInt();
+    });
+    return Value::Nil();
 }
 
 Value ListType::memberLengthGet(Object& self) const {

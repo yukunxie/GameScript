@@ -68,6 +68,7 @@ private:
     DictType dictType_;
     FunctionType functionType_;
     ClassType classType_;
+    ModuleType moduleType_;
     ScriptInstanceType instanceType_;
 };
 

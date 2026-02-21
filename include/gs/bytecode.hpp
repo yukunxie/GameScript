@@ -8,28 +8,71 @@
 
 namespace gs {
 
+class Object;
+
 enum class ValueType : std::uint8_t {
     Nil,
     Int,
     String,
     Ref,
-    Function
+    Function,
+    Class,
+    Module
 };
 
 struct Value {
     ValueType type{ValueType::Nil};
-    std::int64_t payload{0};
+    union {
+        std::int64_t payload;
+        Object* object;
+    };
+
+    Value() : type(ValueType::Nil), payload(0) {}
 
     static Value Nil() { return {}; }
-    static Value Int(std::int64_t v) { return {ValueType::Int, v}; }
-    static Value String(std::int64_t index) { return {ValueType::String, index}; }
-    static Value Ref(std::int64_t id) { return {ValueType::Ref, id}; }
-    static Value Function(std::int64_t functionIndex) { return {ValueType::Function, functionIndex}; }
+    static Value Int(std::int64_t v) {
+        Value out;
+        out.type = ValueType::Int;
+        out.payload = v;
+        return out;
+    }
+    static Value String(std::int64_t index) {
+        Value out;
+        out.type = ValueType::String;
+        out.payload = index;
+        return out;
+    }
+    static Value Ref(Object* ptr) {
+        Value out;
+        out.type = ValueType::Ref;
+        out.object = ptr;
+        return out;
+    }
+    static Value Function(std::int64_t functionIndex) {
+        Value out;
+        out.type = ValueType::Function;
+        out.payload = functionIndex;
+        return out;
+    }
+    static Value Class(std::int64_t classIndex) {
+        Value out;
+        out.type = ValueType::Class;
+        out.payload = classIndex;
+        return out;
+    }
+    static Value Module(std::int64_t moduleIndex) {
+        Value out;
+        out.type = ValueType::Module;
+        out.payload = moduleIndex;
+        return out;
+    }
 
     bool isInt() const { return type == ValueType::Int; }
     bool isString() const { return type == ValueType::String; }
     bool isRef() const { return type == ValueType::Ref; }
     bool isFunction() const { return type == ValueType::Function; }
+    bool isClass() const { return type == ValueType::Class; }
+    bool isModule() const { return type == ValueType::Module; }
     bool isNil() const { return type == ValueType::Nil; }
 
     std::int64_t asInt() const {
@@ -39,11 +82,11 @@ struct Value {
         return payload;
     }
 
-    std::int64_t asRef() const {
+    Object* asRef() const {
         if (!isRef()) {
             throw std::runtime_error("Value is not reference");
         }
-        return payload;
+        return object;
     }
 
     std::int64_t asStringIndex() const {
@@ -56,6 +99,20 @@ struct Value {
     std::int64_t asFunctionIndex() const {
         if (!isFunction()) {
             throw std::runtime_error("Value is not function");
+        }
+        return payload;
+    }
+
+    std::int64_t asClassIndex() const {
+        if (!isClass()) {
+            throw std::runtime_error("Value is not class");
+        }
+        return payload;
+    }
+
+    std::int64_t asModuleIndex() const {
+        if (!isModule()) {
+            throw std::runtime_error("Value is not module");
         }
         return payload;
     }
@@ -73,10 +130,16 @@ inline std::ostream& operator<<(std::ostream& os, const Value& value) {
         os << "str(" << value.payload << ')';
         break;
     case ValueType::Ref:
-        os << "ref(" << value.payload << ')';
+        os << "ref(" << static_cast<const void*>(value.object) << ')';
         break;
     case ValueType::Function:
         os << "fn(" << value.payload << ')';
+        break;
+    case ValueType::Class:
+        os << "class(" << value.payload << ')';
+        break;
+    case ValueType::Module:
+        os << "module(" << value.payload << ')';
         break;
     }
     return os;

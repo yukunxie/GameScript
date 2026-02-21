@@ -34,9 +34,12 @@ fn main() {
     let list = [];
     list.push(10);
     list.push(20);
+    list.push(5);
     let first = list[0];
     print(first);
     list[1] = base;
+    list.sort();
+    print("list(sorted)", list);
     let removedList = list.remove(1);
     print(removedList);
 
