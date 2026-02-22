@@ -19,6 +19,7 @@ set(GS_LIB_SOURCES
     src/global.cpp
     src/type_system/type_base.cpp
     src/type_system/list_type.cpp
+    src/type_system/tuple_type.cpp
     src/type_system/dict_type.cpp
     src/type_system/function_type.cpp
     src/type_system/native_function_type.cpp
@@ -47,6 +48,7 @@ set(GS_LIB_HEADERS
     include/gs/type_system.hpp
     include/gs/type_system/type_base.hpp
     include/gs/type_system/list_type.hpp
+    include/gs/type_system/tuple_type.hpp
     include/gs/type_system/dict_type.hpp
     include/gs/type_system/function_type.hpp
     include/gs/type_system/native_function_type.hpp

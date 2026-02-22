@@ -56,6 +56,18 @@ fn test_list_and_dict() {
     return 1;
 }
 
+fn test_tuple() {
+    let t = Tuple(10, 20, 30);
+    assert(type(t) == "Tuple", "tuple type expected Tuple, actual {}", type(t));
+    assert(t.size() == 3, "tuple size expected 3, actual {}", t.size());
+    assert(t[1] == 20, "tuple[1] expected 20, actual {}", t[1]);
+
+    t[1] = 99;
+    assert(t[1] == 99, "tuple[1] expected 99 after set, actual {}", t[1]);
+    assert(t.size() == 3, "tuple size must stay 3, actual {}", t.size());
+    return 1;
+}
+
 fn test_loops_and_control_flow() {
     let rangeSum = 0;
     for (i in range(0, 10)) {
@@ -167,6 +179,7 @@ fn run_bench(verbose) {
     let passed = 0;
     let passed = passed + test_arithmetic_and_string();
     let passed = passed + test_list_and_dict();
+    let passed = passed + test_tuple();
     let passed = passed + test_loops_and_control_flow();
     let passed = passed + test_modules_and_imports();
     let passed = passed + test_classes_and_host_objects();
@@ -186,7 +199,7 @@ fn run_bench(verbose) {
         print("[bench] suite done");
     }
 
-    assert(passed == 5, "passed groups expected 5, actual {}", passed);
+    assert(passed == 6, "passed groups expected 6, actual {}", passed);
     return checksum1 + checksum2 + checksum3 + reclaimed;
 }
 

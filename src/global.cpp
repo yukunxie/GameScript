@@ -615,6 +615,16 @@ void bindGlobalModule(HostRegistry& host) {
         return context.createString(context.__str__(args[0]));
     });
 
+    host.bind("Tuple", [](HostContext& context, const std::vector<Value>& args) -> Value {
+        static TupleType tupleType;
+        std::vector<Value> values;
+        values.reserve(args.size());
+        for (const auto& value : args) {
+            values.push_back(value);
+        }
+        return context.createObject(std::make_unique<TupleObject>(tupleType, std::move(values)));
+    });
+
     host.bind("type", [](HostContext& context, const std::vector<Value>& args) -> Value {
         if (args.size() != 1) {
             throw std::runtime_error("type() requires exactly one argument");

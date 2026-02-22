@@ -2,6 +2,7 @@
 
 #include "gs/type_system/type_base.hpp"
 #include "gs/type_system/list_type.hpp"
+#include "gs/type_system/tuple_type.hpp"
 #include "gs/type_system/dict_type.hpp"
 #include "gs/type_system/function_type.hpp"
 #include "gs/type_system/native_function_type.hpp"
