@@ -2,6 +2,7 @@
 #include "gs/compiler.hpp"
 #include "gs/type_system.hpp"
 
+#include <cmath>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -114,6 +115,9 @@ std::int64_t toSignedInt(HostContext& context, const Value& value, const char* w
     if (value.isInt()) {
         return value.asInt();
     }
+    if (value.isFloat()) {
+        return static_cast<std::int64_t>(value.asFloat());
+    }
     try {
         return std::stoll(context.__str__(value));
     } catch (...) {
@@ -129,6 +133,9 @@ std::uint64_t toUnsignedInt(HostContext& context, const Value& value, const char
 double toFloatingPoint(HostContext& context, const Value& value, const char* who) {
     if (value.isInt()) {
         return static_cast<double>(value.asInt());
+    }
+    if (value.isFloat()) {
+        return value.asFloat();
     }
     try {
         return std::stod(context.__str__(value));
@@ -632,7 +639,16 @@ void bindGlobalModule(HostRegistry& host) {
             throw std::runtime_error("assert(condition, format, args...) requires at least condition");
         }
 
-        const bool condition = args[0].asInt() != 0;
+        bool condition = false;
+        if (args[0].isInt()) {
+            condition = args[0].asInt() != 0;
+        } else if (args[0].isFloat()) {
+            condition = std::abs(args[0].asFloat()) > std::numeric_limits<double>::epsilon();
+        } else if (args[0].isNil()) {
+            condition = false;
+        } else {
+            condition = true;
+        }
         if (condition) {
             return Value::Int(1);
         }

@@ -1468,6 +1468,9 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
         case ValueType::Int:
             out << "gs::Value::Int(" << c.payload << ")";
             break;
+        case ValueType::Float:
+            out << "gs::Value::Float(" << std::setprecision(17) << c.asFloat() << ")";
+            break;
         case ValueType::String:
             out << "gs::Value::String(" << c.payload << ")";
             break;
@@ -1555,6 +1558,9 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             case ValueType::Int:
                 out << "gs::Value::Int(" << attr.defaultValue.payload << ")";
                 break;
+            case ValueType::Float:
+                out << "gs::Value::Float(" << std::setprecision(17) << attr.defaultValue.asFloat() << ")";
+                break;
             case ValueType::String:
                 out << "gs::Value::String(" << attr.defaultValue.payload << ")";
                 break;
@@ -1590,6 +1596,9 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             break;
         case ValueType::Int:
             out << "gs::Value::Int(" << global.initialValue.payload << ")";
+            break;
+        case ValueType::Float:
+            out << "gs::Value::Float(" << std::setprecision(17) << global.initialValue.asFloat() << ")";
             break;
         case ValueType::String:
             out << "gs::Value::String(" << global.initialValue.payload << ")";

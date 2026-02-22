@@ -8,14 +8,24 @@ from module_math import add, hello as gg;
 
 let TOP_LEVEL_SENTINEL = 314;
 
-print ("gg.hello", gg.hello(), TOP_LEVEL_SENTINEL);
-
 fn test_arithmetic_and_string() {
     let x = 40 + 2;
     assert(x == 42, "x expected 42, actual {}", x);
 
     let y = x * 2 - 20;
     assert(y == 64, "y expected 64, actual {}", y);
+
+    let f = 1.25;
+    assert(type(f) == "float", "f type expected float, actual {}", type(f));
+    let mix = f + 2;
+    assert(type(mix) == "float", "mix type expected float, actual {}", type(mix));
+    assert(mix == 3.25, "mix expected 3.25, actual {}", mix);
+
+    print ("f-mix", f, mix, type(f), type(mix));
+
+    let quotient = 5 / 2;
+    assert(type(quotient) == "float", "quotient type expected float, actual {}", type(quotient));
+    assert(quotient == 2.5, "quotient expected 2.5, actual {}", quotient);
 
     let s = str(y);
     assert(s == "64", "str(y) expected 64, actual {}", s);
@@ -148,8 +158,11 @@ fn benchmark_printf() {
     return checksum;
 }
 
-fn main() {
-    print("[bench] suite start");
+fn run_bench(verbose) {
+    if (verbose == 1) {
+        print("[bench] suite start");
+        print("gg.hello", gg.hello(), TOP_LEVEL_SENTINEL);
+    }
 
     let passed = 0;
     let passed = passed + test_arithmetic_and_string();
@@ -164,13 +177,25 @@ fn main() {
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
-    print("[bench] passed groups", passed);
-    print("[bench] checksum1", checksum1);
-    print("[bench] checksum2", checksum2);
-    print("[bench] checksum3", checksum3);
-    print("[bench] gc", reclaimed);
-    print("[bench] suite done");
+    if (verbose == 1) {
+        print("[bench] passed groups", passed);
+        print("[bench] checksum1", checksum1);
+        print("[bench] checksum2", checksum2);
+        print("[bench] checksum3", checksum3);
+        print("[bench] gc", reclaimed);
+        print("[bench] suite done");
+    }
 
     assert(passed == 5, "passed groups expected 5, actual {}", passed);
+    return checksum1 + checksum2 + checksum3 + reclaimed;
+}
+
+fn ue_entry() {
+    return run_bench(0);
+}
+
+fn main() {
+    let total = run_bench(1);
+    assert(total > 0, "bench total should be positive, actual {}", total);
     return 0;
 }

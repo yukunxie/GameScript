@@ -7,8 +7,11 @@ namespace gs {
 
 namespace {
 
-std::int64_t parseNumericLiteral(const std::string& text) {
-    return static_cast<std::int64_t>(std::stod(text));
+Value parseNumericLiteral(const std::string& text) {
+    if (text.find('.') != std::string::npos) {
+        return Value::Float(std::stod(text));
+    }
+    return Value::Int(static_cast<std::int64_t>(std::stoll(text)));
 }
 
 } // namespace
@@ -396,7 +399,11 @@ Stmt Parser::parseStatement() {
         stmt.type = StmtType::Sleep;
         stmt.line = sleepToken.line;
         stmt.column = sleepToken.column;
-        stmt.sleepMs = Value::Int(parseNumericLiteral(consume(TokenType::Number, "Expected millisecond number").text));
+        const Value sleepValue = parseNumericLiteral(consume(TokenType::Number, "Expected millisecond number").text);
+        if (!sleepValue.isInt()) {
+            throw std::runtime_error(formatParseError("sleep requires integer milliseconds", previous()));
+        }
+        stmt.sleepMs = sleepValue;
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
@@ -556,7 +563,7 @@ Expr Parser::parsePrimary() {
         expr.type = ExprType::Number;
         expr.line = previous().line;
         expr.column = previous().column;
-        expr.value = Value::Int(parseNumericLiteral(previous().text));
+        expr.value = parseNumericLiteral(previous().text);
         return parsePostfix(std::move(expr));
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,7 @@ class Object;
 enum class ValueType : std::uint8_t {
     Nil,
     Int,
+    Float,
     String,
     Ref,
     Function,
@@ -42,6 +44,15 @@ struct Value {
         out.payload = index;
         return out;
     }
+    static Value Float(double v) {
+        Value out;
+        out.type = ValueType::Float;
+        static_assert(sizeof(double) == sizeof(std::int64_t), "double size must match int64 payload storage");
+        std::int64_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(double));
+        out.payload = bits;
+        return out;
+    }
     static Value Ref(Object* ptr) {
         Value out;
         out.type = ValueType::Ref;
@@ -68,6 +79,7 @@ struct Value {
     }
 
     bool isInt() const { return type == ValueType::Int; }
+    bool isFloat() const { return type == ValueType::Float; }
     bool isString() const { return type == ValueType::String; }
     bool isRef() const { return type == ValueType::Ref; }
     bool isFunction() const { return type == ValueType::Function; }
@@ -80,6 +92,15 @@ struct Value {
             throw std::runtime_error("Value is not integer");
         }
         return payload;
+    }
+
+    double asFloat() const {
+        if (!isFloat()) {
+            throw std::runtime_error("Value is not float");
+        }
+        double out = 0.0;
+        std::memcpy(&out, &payload, sizeof(double));
+        return out;
     }
 
     Object* asRef() const {
@@ -125,6 +146,9 @@ inline std::ostream& operator<<(std::ostream& os, const Value& value) {
         break;
     case ValueType::Int:
         os << value.payload;
+        break;
+    case ValueType::Float:
+        os << value.asFloat();
         break;
     case ValueType::String:
         os << "str(" << value.payload << ')';

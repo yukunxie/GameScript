@@ -3,6 +3,10 @@
 #include <chrono>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -451,6 +455,11 @@ std::string __str__ValueImpl(const ExecutionContext& context,
         return "nil";
     case ValueType::Int:
         return std::to_string(value.asInt());
+    case ValueType::Float: {
+        std::ostringstream out;
+        out << std::setprecision(17) << value.asFloat();
+        return out.str();
+    }
     case ValueType::String:
         return getString(context, value);
     case ValueType::Ref:
@@ -470,12 +479,41 @@ std::string __str__Value(const ExecutionContext& context, const Value& value) {
     return __str__ValueImpl(context, value, visitingRefs);
 }
 
+bool isNumericValue(const Value& value) {
+    return value.isInt() || value.isFloat();
+}
+
+double toDouble(const Value& value) {
+    if (value.isFloat()) {
+        return value.asFloat();
+    }
+    if (value.isInt()) {
+        return static_cast<double>(value.asInt());
+    }
+    throw std::runtime_error("Value is not numeric");
+}
+
+std::int64_t toBoolInt(const Value& value) {
+    if (value.isNil()) {
+        return 0;
+    }
+    if (value.isInt()) {
+        return value.asInt() != 0 ? 1 : 0;
+    }
+    if (value.isFloat()) {
+        return std::abs(value.asFloat()) > std::numeric_limits<double>::epsilon() ? 1 : 0;
+    }
+    return 1;
+}
+
 std::string typeNameOfValue(const ExecutionContext& context, const Value& value) {
     switch (value.type) {
     case ValueType::Nil:
         return "nil";
     case ValueType::Int:
         return "int";
+    case ValueType::Float:
+        return "float";
     case ValueType::String:
         return "string";
     case ValueType::Function:
@@ -505,6 +543,9 @@ Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
 }
 
 bool valueEquals(const ExecutionContext& context, const Value& lhs, const Value& rhs) {
+    if (isNumericValue(lhs) && isNumericValue(rhs)) {
+        return std::abs(toDouble(lhs) - toDouble(rhs)) <= std::numeric_limits<double>::epsilon();
+    }
     if (lhs.type != rhs.type) {
         return false;
     }
@@ -1070,6 +1111,8 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             const Value lhs = popValue(frame.stack);
             if (lhs.isInt() && rhs.isInt()) {
                 frame.stack.push_back(Value::Int(lhs.asInt() + rhs.asInt()));
+            } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                frame.stack.push_back(Value::Float(toDouble(lhs) + toDouble(rhs)));
             } else {
                 frame.stack.push_back(makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs)));
             }
@@ -1078,31 +1121,56 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
         case OpCode::Sub: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() - rhs.asInt()));
+            if (lhs.isInt() && rhs.isInt()) {
+                frame.stack.push_back(Value::Int(lhs.asInt() - rhs.asInt()));
+            } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                frame.stack.push_back(Value::Float(toDouble(lhs) - toDouble(rhs)));
+            } else {
+                throw std::runtime_error("Sub expects numeric operands");
+            }
             break;
         }
         case OpCode::Mul: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() * rhs.asInt()));
+            if (lhs.isInt() && rhs.isInt()) {
+                frame.stack.push_back(Value::Int(lhs.asInt() * rhs.asInt()));
+            } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                frame.stack.push_back(Value::Float(toDouble(lhs) * toDouble(rhs)));
+            } else {
+                throw std::runtime_error("Mul expects numeric operands");
+            }
             break;
         }
         case OpCode::Div: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() / rhs.asInt()));
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("Div expects numeric operands");
+            }
+            const double divisor = toDouble(rhs);
+            if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                throw std::runtime_error("Division by zero");
+            }
+            frame.stack.push_back(Value::Float(toDouble(lhs) / divisor));
             break;
         }
         case OpCode::LessThan: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() < rhs.asInt() ? 1 : 0));
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("LessThan expects numeric operands");
+            }
+            frame.stack.push_back(Value::Int(toDouble(lhs) < toDouble(rhs) ? 1 : 0));
             break;
         }
         case OpCode::GreaterThan: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() > rhs.asInt() ? 1 : 0));
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("GreaterThan expects numeric operands");
+            }
+            frame.stack.push_back(Value::Int(toDouble(lhs) > toDouble(rhs) ? 1 : 0));
             break;
         }
         case OpCode::Equal: {
@@ -1120,13 +1188,19 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
         case OpCode::LessEqual: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() <= rhs.asInt() ? 1 : 0));
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("LessEqual expects numeric operands");
+            }
+            frame.stack.push_back(Value::Int(toDouble(lhs) <= toDouble(rhs) ? 1 : 0));
             break;
         }
         case OpCode::GreaterEqual: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(lhs.asInt() >= rhs.asInt() ? 1 : 0));
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("GreaterEqual expects numeric operands");
+            }
+            frame.stack.push_back(Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0));
             break;
         }
         case OpCode::Jump:
@@ -1134,7 +1208,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         case OpCode::JumpIfFalse: {
             const Value cond = popValue(frame.stack);
-            if (cond.asInt() == 0) {
+            if (toBoolInt(cond) == 0) {
                 frame.ip = static_cast<std::size_t>(ins.a);
             }
             break;
