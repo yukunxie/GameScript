@@ -1,10 +1,21 @@
 #include "gs/tokenizer.hpp"
 
 #include <cctype>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
 namespace gs {
+
+namespace {
+
+std::string formatTokenizerError(const std::string& message, std::size_t line, std::size_t column) {
+    std::ostringstream out;
+    out << line << ":" << column << ": error: " << message << " [function: <module>]";
+    return out.str();
+}
+
+} // namespace
 
 Tokenizer::Tokenizer(std::string source) : source_(std::move(source)) {}
 
@@ -109,7 +120,7 @@ std::vector<Token> Tokenizer::tokenize() {
             tokens.push_back({TokenType::Slash, "/", line, column});
             break;
         default:
-            throw std::runtime_error("Unexpected character in script source");
+            throw std::runtime_error(formatTokenizerError("Unexpected character in script source", line, column));
         }
     }
 
@@ -180,9 +191,7 @@ void Tokenizer::skipWhitespace() {
                 advance();
             }
             if (!closed) {
-                throw std::runtime_error("Unterminated block comment at " +
-                                         std::to_string(startLine) + ":" +
-                                         std::to_string(startColumn));
+                throw std::runtime_error(formatTokenizerError("Unterminated block comment", startLine, startColumn));
             }
             continue;
         }
@@ -266,7 +275,7 @@ Token Tokenizer::stringLiteral() {
         }
         if (c == '\\') {
             if (isAtEnd()) {
-                throw std::runtime_error("Unterminated escape sequence in string literal");
+                throw std::runtime_error(formatTokenizerError("Unterminated escape sequence in string literal", line_, column_));
             }
             const char esc = advance();
             switch (esc) {
@@ -282,7 +291,7 @@ Token Tokenizer::stringLiteral() {
         value.push_back(c);
     }
 
-    throw std::runtime_error("Unterminated string literal");
+    throw std::runtime_error(formatTokenizerError("Unterminated string literal", line, col));
 }
 
 } // namespace gs

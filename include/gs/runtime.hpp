@@ -22,6 +22,9 @@ public:
     bool loadSourceFile(const std::string& path, const std::vector<std::string>& searchPaths = {});
     bool loadBytecodeFile(const std::string& path);
     bool hotReloadSource(const std::string& path);
+    const std::string& lastError() const;
+    void setDumpTransformedSource(bool enabled);
+    bool dumpTransformedSourceEnabled() const;
 
     Value call(const std::string& functionName, const std::vector<Value>& args = {});
 
@@ -30,6 +33,8 @@ public:
 private:
     mutable std::mutex moduleMutex_;
     std::shared_ptr<Module> module_;
+    std::string lastError_;
+    bool dumpTransformedSource_{true};
     HostRegistry hosts_;
     ThreadPool pool_;
     TaskSystem tasks_;

@@ -105,7 +105,7 @@ std::string replaceAllRegex(const std::string& input,
 
 struct ImportStatement {
     std::string moduleSpec;
-    std::string importName;
+    std::vector<std::string> importNames;
     std::string alias;
     bool valid{false};
     bool isFrom{false};
@@ -122,6 +122,11 @@ struct ProcessedModule {
     std::string source;
     std::vector<std::string> exports;
 };
+
+std::string formatCompilerError(const std::string& message,
+                                const std::string& functionName,
+                                std::size_t line,
+                                std::size_t column);
 
 std::string defaultModuleAlias(const std::string& moduleSpec) {
     const std::size_t slash = moduleSpec.find_last_of("/\\");
@@ -168,9 +173,9 @@ std::vector<std::string> extractExportsFromSource(const std::string& source) {
 
 std::string buildModuleAliasInitBlock(const ModuleAliasBinding& binding) {
     std::ostringstream out;
-    out << "let " << binding.alias << " = Module(\"" << binding.moduleSpec << "\");\n";
+    out << "let " << binding.alias << " = loadModule(\"" << binding.moduleSpec << "\"); ";
     for (const auto& symbol : binding.exports) {
-        out << binding.alias << "." << symbol << " = " << symbol << ";\n";
+        out << binding.alias << "." << symbol << " = " << symbol << "; ";
     }
     return out.str();
 }
@@ -193,17 +198,31 @@ std::string injectIntoFunctionBodies(const std::string& source, const std::strin
     }
 
     static const std::regex fnHeaderRe(R"((^\s*fn\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*\{))");
+    const auto injectLines = splitLines(injectionBlock);
     std::ostringstream out;
     for (const auto& line : splitLines(source)) {
+        if (!std::regex_search(line, fnHeaderRe)) {
+            out << line << '\n';
+            continue;
+        }
+
         out << line << '\n';
-        if (std::regex_search(line, fnHeaderRe)) {
-            out << injectionBlock;
+        std::size_t indentWidth = 0;
+        while (indentWidth < line.size() && std::isspace(static_cast<unsigned char>(line[indentWidth]))) {
+            ++indentWidth;
+        }
+        const std::string indent = line.substr(0, indentWidth) + "    ";
+        for (const auto& injectLine : injectLines) {
+            if (injectLine.empty()) {
+                continue;
+            }
+            out << indent << injectLine << '\n';
         }
     }
     return out.str();
 }
 
-ImportStatement parseImportLine(const std::string& rawLine) {
+ImportStatement parseImportLine(const std::string& rawLine, std::size_t lineNo = 0) {
     ImportStatement stmt;
     std::string line = trimCopy(rawLine);
     if (line.empty()) {
@@ -219,7 +238,6 @@ ImportStatement parseImportLine(const std::string& rawLine) {
 
     std::smatch match;
     static const std::regex importRe(R"(^import\s+([A-Za-z_][A-Za-z0-9_./]*)\s*(?:as\s+([A-Za-z_][A-Za-z0-9_]*))?$)");
-    static const std::regex fromRe(R"(^from\s+([A-Za-z_][A-Za-z0-9_./]*)\s+import\s+(\*|[A-Za-z_][A-Za-z0-9_]*)\s*(?:as\s+([A-Za-z_][A-Za-z0-9_]*))?$)");
 
     if (std::regex_match(line, match, importRe)) {
         stmt.valid = true;
@@ -232,14 +250,59 @@ ImportStatement parseImportLine(const std::string& rawLine) {
         return stmt;
     }
 
-    if (std::regex_match(line, match, fromRe)) {
+    if (line.rfind("from ", 0) == 0) {
+        const std::size_t importPos = line.find(" import ");
+        if (importPos == std::string::npos) {
+            return stmt;
+        }
+
+        const std::string moduleSpec = trimCopy(line.substr(5, importPos - 5));
+        if (moduleSpec.empty()) {
+            return stmt;
+        }
+
+        std::string importSpec = trimCopy(line.substr(importPos + 8));
+        std::string alias;
+        static const std::regex identRe(R"(^[A-Za-z_][A-Za-z0-9_]*$)");
+
+        const std::size_t asPos = importSpec.rfind(" as ");
+        if (asPos != std::string::npos) {
+            const std::string aliasCandidate = trimCopy(importSpec.substr(asPos + 4));
+            if (aliasCandidate.empty() || !std::regex_match(aliasCandidate, identRe)) {
+                return stmt;
+            }
+            alias = aliasCandidate;
+            importSpec = trimCopy(importSpec.substr(0, asPos));
+        }
+
         stmt.valid = true;
         stmt.isFrom = true;
-        stmt.moduleSpec = match[1].str();
-        stmt.importName = match[2].str();
-        stmt.isWildcard = stmt.importName == "*";
-        if (match.size() > 3) {
-            stmt.alias = match[3].str();
+        stmt.moduleSpec = moduleSpec;
+        stmt.alias = alias;
+
+        if (importSpec == "*") {
+            stmt.isWildcard = true;
+            return stmt;
+        }
+
+        std::istringstream namesIn(importSpec);
+        std::string segment;
+        while (std::getline(namesIn, segment, ',')) {
+            std::string name = trimCopy(segment);
+            if (name.empty() || !std::regex_match(name, identRe)) {
+                throw std::runtime_error(formatCompilerError("Invalid import symbol in line: " + rawLine,
+                                                             "<module>",
+                                                             lineNo,
+                                                             1));
+            }
+            stmt.importNames.push_back(name);
+        }
+
+        if (stmt.importNames.empty()) {
+            throw std::runtime_error(formatCompilerError("from-import requires at least one symbol",
+                                                         "<module>",
+                                                         lineNo,
+                                                         1));
         }
         return stmt;
     }
@@ -251,97 +314,94 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
                                            const std::vector<std::string>& searchPaths,
                                            std::unordered_map<std::string, ProcessedModule>& cache,
                                            std::unordered_set<std::string>& visiting) {
+    (void)searchPaths;
     const std::string canonical = std::filesystem::weakly_canonical(filePath).string();
     auto cached = cache.find(canonical);
     if (cached != cache.end()) {
         return cached->second;
     }
     if (visiting.contains(canonical)) {
-        throw std::runtime_error("Cyclic import detected: " + canonical);
+        throw std::runtime_error(formatCompilerError("Cyclic import detected: " + canonical,
+                                                     "<module>",
+                                                     1,
+                                                     1));
     }
 
     const std::string source = readFileText(canonical);
     if (source.empty()) {
-        throw std::runtime_error("Failed to read script file: " + canonical);
+        throw std::runtime_error(formatCompilerError("Failed to read script file: " + canonical,
+                                                     "<module>",
+                                                     1,
+                                                     1));
     }
 
     visiting.insert(canonical);
 
     std::ostringstream bodySource;
-    std::vector<std::pair<std::string, std::string>> symbolAliases;
-    std::vector<ModuleAliasBinding> moduleAliases;
-    bool hasSystemAlias{false};
-    std::size_t internalAliasIndex = 0;
+    std::size_t importTempIndex = 0;
 
     const auto lines = splitLines(source);
-    for (const auto& line : lines) {
-        ImportStatement stmt = parseImportLine(line);
+    for (std::size_t lineIndex = 0; lineIndex < lines.size(); ++lineIndex) {
+        const auto& line = lines[lineIndex];
+        const std::size_t lineNo = lineIndex + 1;
+        ImportStatement stmt = parseImportLine(line, lineNo);
         if (!stmt.valid) {
             bodySource << line << '\n';
             continue;
         }
 
-        const bool isBuiltinSystem = (stmt.moduleSpec == "system" || stmt.moduleSpec == "system.gs");
-        if (!isBuiltinSystem) {
-            const std::string resolvedImport = resolveImportPath(stmt.moduleSpec, canonical, searchPaths);
-            if (resolvedImport.empty()) {
-                throw std::runtime_error("Cannot resolve import '" + stmt.moduleSpec + "' from " + canonical);
-            }
-
-            (void)preprocessImportsRecursive(resolvedImport, searchPaths, cache, visiting);
-        }
-
         if (!stmt.isFrom) {
             const std::string alias = stmt.alias.empty() ? defaultModuleAlias(stmt.moduleSpec) : stmt.alias;
-            if (alias == "system") {
-                hasSystemAlias = true;
-            }
-            moduleAliases.push_back({alias, stmt.moduleSpec, {}});
+            bodySource << "let " << alias << " = loadModule(\"" << stmt.moduleSpec << "\");\n";
             continue;
         }
 
         if (stmt.isWildcard) {
             if (stmt.alias.empty()) {
-                throw std::runtime_error("from " + stmt.moduleSpec + " import * requires alias in strict module mode");
+                throw std::runtime_error(formatCompilerError("from " + stmt.moduleSpec + " import * requires alias in strict module mode",
+                                                             "<module>",
+                                                             lineNo,
+                                                             1));
             }
-            if (stmt.alias == "system") {
-                hasSystemAlias = true;
-            }
-            moduleAliases.push_back({stmt.alias, stmt.moduleSpec, {}});
+            bodySource << "let " << stmt.alias << " = loadModule(\"" << stmt.moduleSpec << "\");\n";
             continue;
         }
 
-        const std::string alias = stmt.alias.empty() ? stmt.importName : stmt.alias;
-        if (alias == "system") {
-            hasSystemAlias = true;
+        if (stmt.importNames.size() > 1) {
+            if (stmt.alias.empty()) {
+                throw std::runtime_error(formatCompilerError("from " + stmt.moduleSpec + " import a,b requires alias in strict module mode",
+                                                             "<module>",
+                                                             lineNo,
+                                                             1));
+            }
+
+            bodySource << "let " << stmt.alias << " = loadModule(\"" << stmt.moduleSpec << "\"";
+            for (const auto& symbol : stmt.importNames) {
+                bodySource << ", \"" << symbol << "\"";
+            }
+            bodySource << ");\n";
+            continue;
         }
-        const std::string internalModuleAlias = makeInternalAlias(stmt.moduleSpec, internalAliasIndex++);
-        moduleAliases.push_back({internalModuleAlias, stmt.moduleSpec, {}});
-        symbolAliases.push_back({alias, internalModuleAlias + "." + stmt.importName});
-    }
 
-    if (!hasSystemAlias) {
-        moduleAliases.push_back({"system", "system", {}});
+        const std::string importedName = stmt.importNames.front();
+        const std::string localName = stmt.alias.empty() ? importedName : stmt.alias;
+        static const std::regex identRe(R"(^[A-Za-z_][A-Za-z0-9_]*$)");
+        if (!std::regex_match(localName, identRe)) {
+            throw std::runtime_error(formatCompilerError("Invalid local alias generated for from-import: " + localName,
+                                                         "<module>",
+                                                         lineNo,
+                                                         1));
+        }
+        const std::string tempName = makeInternalAlias("import_" + stmt.moduleSpec, importTempIndex++);
+        bodySource << "let " << tempName << " = loadModule(\"" << stmt.moduleSpec << "\", \"" << importedName << "\"); "
+                   << "let " << localName << " = " << tempName << "." << importedName << ";\n";
     }
-
-    std::string body = bodySource.str();
-    for (const auto& [alias, symbolExpr] : symbolAliases) {
-        std::ostringstream block;
-        block << "let " << alias << " = " << symbolExpr << ";\n";
-        body = injectIntoFunctionBodies(body, block.str());
-    }
-
-    std::ostringstream injectBlock;
-    for (const auto& moduleAlias : moduleAliases) {
-        injectBlock << buildModuleAliasInitBlock(moduleAlias);
-    }
-    body = injectIntoFunctionBodies(body, injectBlock.str());
 
     visiting.erase(canonical);
 
     ProcessedModule processed;
-    processed.source = body;
-    processed.exports = extractExportsFromSource(body);
+    processed.source = bodySource.str();
+    processed.exports = extractExportsFromSource(processed.source);
     cache.emplace(canonical, processed);
     return processed;
 }
@@ -352,6 +412,20 @@ struct LoopContext {
     std::size_t continueTarget{0};
 };
 
+std::string formatCompilerError(const std::string& message,
+                                const std::string& functionName,
+                                std::size_t line,
+                                std::size_t column) {
+    std::ostringstream out;
+    if (line > 0 && column > 0) {
+        out << line << ":" << column << ": error: " << message;
+    } else {
+        out << "error: " << message;
+    }
+    out << " [function: " << (functionName.empty() ? "<module>" : functionName) << "]";
+    return out.str();
+}
+
 std::string mangleMethodName(const std::string& className, const std::string& methodName) {
     return className + "::" + methodName;
 }
@@ -361,7 +435,8 @@ std::int32_t addString(Module& module, const std::string& value);
 Value evalClassFieldInit(const Expr& expr,
                         Module& module,
                         const std::unordered_map<std::string, std::size_t>& funcIndex,
-                        const std::unordered_map<std::string, std::size_t>& classIndex);
+                        const std::unordered_map<std::string, std::size_t>& classIndex,
+                        const std::string& scopeName);
 
 bool resolveNamedValue(const Module& module,
                        const std::unordered_map<std::string, std::size_t>& funcIndex,
@@ -414,7 +489,8 @@ SymbolLookupResult resolveSymbol(const std::unordered_map<std::string, std::size
 Value evalClassFieldInit(const Expr& expr,
                         Module& module,
                         const std::unordered_map<std::string, std::size_t>& funcIndex,
-                        const std::unordered_map<std::string, std::size_t>& classIndex) {
+                        const std::unordered_map<std::string, std::size_t>& classIndex,
+                        const std::string& scopeName) {
     switch (expr.type) {
     case ExprType::Number:
         return expr.value;
@@ -431,13 +507,17 @@ Value evalClassFieldInit(const Expr& expr,
         break;
     }
 
-    throw std::runtime_error("Class field initializer must be number/string/symbol name");
+    throw std::runtime_error(formatCompilerError("Class field initializer must be number/string/symbol name",
+                                                 scopeName,
+                                                 expr.line,
+                                                 expr.column));
 }
 
 Value evalGlobalInit(const Expr& expr,
                     Module& module,
                     const std::unordered_map<std::string, std::size_t>& funcIndex,
-                    const std::unordered_map<std::string, std::size_t>& classIndex) {
+                    const std::unordered_map<std::string, std::size_t>& classIndex,
+                    const std::string& scopeName) {
     switch (expr.type) {
     case ExprType::Number:
         return expr.value;
@@ -454,7 +534,10 @@ Value evalGlobalInit(const Expr& expr,
         break;
     }
 
-    throw std::runtime_error("Top-level let initializer must be number/string/symbol name");
+    throw std::runtime_error(formatCompilerError("Top-level let initializer must be number/string/symbol name",
+                                                 scopeName,
+                                                 expr.line,
+                                                 expr.column));
 }
 
 std::int32_t addConstant(Module& module, Value value) {
@@ -503,6 +586,7 @@ void compileExpr(const Expr& expr,
                  const std::unordered_map<std::string, std::size_t>& locals,
                  const std::unordered_map<std::string, std::size_t>& funcIndex,
                  const std::unordered_map<std::string, std::size_t>& classIndex,
+                 const std::string& currentFunctionName,
                  std::vector<Instruction>& code) {
     switch (expr.type) {
     case ExprType::Number:
@@ -530,24 +614,30 @@ void compileExpr(const Expr& expr,
     }
     case ExprType::AssignProperty:
         if (!expr.object || !expr.right) {
-            throw std::runtime_error("Property assignment expression is incomplete");
+            throw std::runtime_error(formatCompilerError("Property assignment expression is incomplete",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
-        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
-        compileExpr(*expr.right, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
         emit(code, OpCode::StoreAttr, addString(module, expr.propertyName), 0);
         return;
     case ExprType::AssignIndex:
         if (!expr.object || !expr.index || !expr.right) {
-            throw std::runtime_error("Index assignment expression is incomplete");
+            throw std::runtime_error(formatCompilerError("Index assignment expression is incomplete",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
-        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
-        compileExpr(*expr.index, module, locals, funcIndex, classIndex, code);
-        compileExpr(*expr.right, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        compileExpr(*expr.index, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
         emit(code, OpCode::CallMethod, addString(module, "set"), 2);
         return;
     case ExprType::Binary:
-        compileExpr(*expr.left, module, locals, funcIndex, classIndex, code);
-        compileExpr(*expr.right, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.left, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
         switch (expr.binaryOp) {
         case TokenType::Plus:
             emit(code, OpCode::Add);
@@ -580,25 +670,31 @@ void compileExpr(const Expr& expr,
             emit(code, OpCode::GreaterEqual);
             break;
         default:
-            throw std::runtime_error("Unsupported binary operator");
+            throw std::runtime_error(formatCompilerError("Unsupported binary operator",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
         return;
     case ExprType::ListLiteral:
         for (const auto& it : expr.listElements) {
-            compileExpr(it, module, locals, funcIndex, classIndex, code);
+            compileExpr(it, module, locals, funcIndex, classIndex, currentFunctionName, code);
         }
         emit(code, OpCode::MakeList, static_cast<std::int32_t>(expr.listElements.size()));
         return;
     case ExprType::DictLiteral:
         for (const auto& kv : expr.dictEntries) {
-            compileExpr(*kv.key, module, locals, funcIndex, classIndex, code);
-            compileExpr(*kv.value, module, locals, funcIndex, classIndex, code);
+            compileExpr(*kv.key, module, locals, funcIndex, classIndex, currentFunctionName, code);
+            compileExpr(*kv.value, module, locals, funcIndex, classIndex, currentFunctionName, code);
         }
         emit(code, OpCode::MakeDict, static_cast<std::int32_t>(expr.dictEntries.size()));
         return;
     case ExprType::Call: {
         if (!expr.callee) {
-            throw std::runtime_error("Call expression callee is empty");
+            throw std::runtime_error(formatCompilerError("Call expression callee is empty",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
 
         if (expr.callee->type == ExprType::Variable) {
@@ -613,7 +709,7 @@ void compileExpr(const Expr& expr,
             if (!resolved.found) {
                 emit(code, OpCode::LoadName, addString(module, calleeName), 0);
                 for (const auto& arg : expr.args) {
-                    compileExpr(arg, module, locals, funcIndex, classIndex, code);
+                    compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code);
                 }
                 emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
                 return;
@@ -621,26 +717,29 @@ void compileExpr(const Expr& expr,
 
             emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
             for (const auto& arg : expr.args) {
-                compileExpr(arg, module, locals, funcIndex, classIndex, code);
+                compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code);
             }
             emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
             return;
         }
 
-        compileExpr(*expr.callee, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.callee, module, locals, funcIndex, classIndex, currentFunctionName, code);
         for (const auto& arg : expr.args) {
-            compileExpr(arg, module, locals, funcIndex, classIndex, code);
+            compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code);
         }
         emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
         return;
     }
     case ExprType::MethodCall:
         if (!expr.object) {
-            throw std::runtime_error("Method call object is empty");
+            throw std::runtime_error(formatCompilerError("Method call object is empty",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
-        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, currentFunctionName, code);
         for (const auto& arg : expr.args) {
-            compileExpr(arg, module, locals, funcIndex, classIndex, code);
+            compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code);
         }
         emit(code,
              OpCode::CallMethod,
@@ -649,17 +748,23 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::PropertyAccess:
         if (!expr.object) {
-            throw std::runtime_error("Property access object is empty");
+            throw std::runtime_error(formatCompilerError("Property access object is empty",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
-        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, currentFunctionName, code);
         emit(code, OpCode::LoadAttr, addString(module, expr.propertyName), 0);
         return;
     case ExprType::IndexAccess:
         if (!expr.object || !expr.index) {
-            throw std::runtime_error("Index access expression is incomplete");
+            throw std::runtime_error(formatCompilerError("Index access expression is incomplete",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
         }
-        compileExpr(*expr.object, module, locals, funcIndex, classIndex, code);
-        compileExpr(*expr.index, module, locals, funcIndex, classIndex, code);
+        compileExpr(*expr.object, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        compileExpr(*expr.index, module, locals, funcIndex, classIndex, currentFunctionName, code);
         emit(code, OpCode::CallMethod, addString(module, "get"), 1);
         return;
     }
@@ -670,29 +775,41 @@ void compileStatements(const std::vector<Stmt>& statements,
                        std::unordered_map<std::string, std::size_t>& locals,
                        const std::unordered_map<std::string, std::size_t>& funcIndex,
                        const std::unordered_map<std::string, std::size_t>& classIndex,
+                       const std::string& currentFunctionName,
+                       bool isModuleInit,
                        FunctionBytecode& out,
                        LoopContext* loopContext) {
     for (const auto& stmt : statements) {
         switch (stmt.type) {
         case StmtType::LetExpr: {
-            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, out.code);
-            const auto slot = ensureLocal(locals, out, stmt.name);
-            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
+            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
+            if (isModuleInit) {
+                emit(out.code, OpCode::StoreName, addString(module, stmt.name), 0);
+            } else {
+                const auto slot = ensureLocal(locals, out, stmt.name);
+                emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
+            }
             break;
         }
         case StmtType::LetSpawn: {
-            throw std::runtime_error("'spawn' is temporarily disabled. Coroutine features are not enabled.");
+            throw std::runtime_error(formatCompilerError("'spawn' is temporarily disabled. Coroutine features are not enabled.",
+                                                         currentFunctionName,
+                                                         stmt.line,
+                                                         stmt.column));
         }
         case StmtType::LetAwait: {
-            throw std::runtime_error("'await' is temporarily disabled. Coroutine features are not enabled.");
+            throw std::runtime_error(formatCompilerError("'await' is temporarily disabled. Coroutine features are not enabled.",
+                                                         currentFunctionName,
+                                                         stmt.line,
+                                                         stmt.column));
         }
         case StmtType::ForRange: {
             const auto iterSlot = ensureLocal(locals, out, stmt.iterKey);
             const auto endSlot = ensureLocal(locals, out, "__for_end_" + stmt.iterKey + std::to_string(out.code.size()));
 
-            compileExpr(stmt.rangeStart, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.rangeStart, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(iterSlot));
-            compileExpr(stmt.rangeEnd, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.rangeEnd, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(endSlot));
 
             const std::size_t loopStart = out.code.size();
@@ -702,7 +819,7 @@ void compileStatements(const std::vector<Stmt>& statements,
             const std::size_t exitJump = emitJump(out.code, OpCode::JumpIfFalse);
 
             LoopContext localLoop;
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, out, &localLoop);
+            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
 
             localLoop.continueTarget = out.code.size();
             emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(iterSlot));
@@ -727,7 +844,7 @@ void compileStatements(const std::vector<Stmt>& statements,
             const auto indexSlot = ensureLocal(locals, out, "__for_idx_" + stmt.iterKey + std::to_string(out.code.size()));
             const auto sizeSlot = ensureLocal(locals, out, "__for_size_" + stmt.iterKey + std::to_string(out.code.size()));
 
-            compileExpr(stmt.iterable, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.iterable, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(listSlot));
             emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(indexSlot));
@@ -748,7 +865,7 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(itemSlot));
 
             LoopContext localLoop;
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, out, &localLoop);
+            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
 
             localLoop.continueTarget = out.code.size();
             emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
@@ -774,7 +891,7 @@ void compileStatements(const std::vector<Stmt>& statements,
             const auto indexSlot = ensureLocal(locals, out, "__for_idx_" + stmt.iterKey + std::to_string(out.code.size()));
             const auto sizeSlot = ensureLocal(locals, out, "__for_size_" + stmt.iterKey + std::to_string(out.code.size()));
 
-            compileExpr(stmt.iterable, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.iterable, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(dictSlot));
             emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(indexSlot));
@@ -800,7 +917,7 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(valueSlot));
 
             LoopContext localLoop;
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, out, &localLoop);
+            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
 
             localLoop.continueTarget = out.code.size();
             emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
@@ -822,15 +939,15 @@ void compileStatements(const std::vector<Stmt>& statements,
         case StmtType::If: {
             std::vector<std::size_t> endJumps;
             for (std::size_t i = 0; i < stmt.branchConditions.size(); ++i) {
-                compileExpr(stmt.branchConditions[i], module, locals, funcIndex, classIndex, out.code);
+                compileExpr(stmt.branchConditions[i], module, locals, funcIndex, classIndex, currentFunctionName, out.code);
                 const std::size_t falseJump = emitJump(out.code, OpCode::JumpIfFalse);
-                compileStatements(stmt.branchBodies[i], module, locals, funcIndex, classIndex, out, loopContext);
+                compileStatements(stmt.branchBodies[i], module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, loopContext);
                 endJumps.push_back(emitJump(out.code, OpCode::Jump));
                 patchJump(out.code, falseJump, out.code.size());
             }
 
             if (!stmt.elseBody.empty()) {
-                compileStatements(stmt.elseBody, module, locals, funcIndex, classIndex, out, loopContext);
+                compileStatements(stmt.elseBody, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, loopContext);
             }
 
             const std::size_t afterIf = out.code.size();
@@ -844,10 +961,10 @@ void compileStatements(const std::vector<Stmt>& statements,
             const std::size_t loopStart = out.code.size();
             localLoop.continueTarget = loopStart;
 
-            compileExpr(stmt.condition, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.condition, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             const std::size_t exitJump = emitJump(out.code, OpCode::JumpIfFalse);
 
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, out, &localLoop);
+            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
             const std::size_t loopEnd = out.code.size();
@@ -862,28 +979,40 @@ void compileStatements(const std::vector<Stmt>& statements,
         }
         case StmtType::Break:
             if (!loopContext) {
-                throw std::runtime_error("'break' used outside of loop");
+                throw std::runtime_error(formatCompilerError("'break' used outside of loop",
+                                                             currentFunctionName,
+                                                             stmt.line,
+                                                             stmt.column));
             }
             loopContext->breakJumps.push_back(emitJump(out.code, OpCode::Jump));
             break;
         case StmtType::Continue:
             if (!loopContext) {
-                throw std::runtime_error("'continue' used outside of loop");
+                throw std::runtime_error(formatCompilerError("'continue' used outside of loop",
+                                                             currentFunctionName,
+                                                             stmt.line,
+                                                             stmt.column));
             }
             loopContext->continueJumps.push_back(emitJump(out.code, OpCode::Jump));
             break;
         case StmtType::Expr:
-            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::Pop);
             break;
         case StmtType::Return:
-            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, out.code);
+            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::Return);
             break;
         case StmtType::Sleep:
-            throw std::runtime_error("'sleep' is temporarily disabled. Coroutine features are not enabled.");
+            throw std::runtime_error(formatCompilerError("'sleep' is temporarily disabled. Coroutine features are not enabled.",
+                                                         currentFunctionName,
+                                                         stmt.line,
+                                                         stmt.column));
         case StmtType::Yield:
-            throw std::runtime_error("'yield' is temporarily disabled. Coroutine features are not enabled.");
+            throw std::runtime_error(formatCompilerError("'yield' is temporarily disabled. Coroutine features are not enabled.",
+                                                         currentFunctionName,
+                                                         stmt.line,
+                                                         stmt.column));
         }
     }
 }
@@ -897,7 +1026,10 @@ Module Compiler::compile(const Program& program) {
 
     for (const auto& cls : program.classes) {
         if (classIndex.contains(cls.name)) {
-            throw std::runtime_error("Duplicate class name: " + cls.name);
+            throw std::runtime_error(formatCompilerError("Duplicate class name: " + cls.name,
+                                                         "<module>",
+                                                         cls.line,
+                                                         cls.column));
         }
         ClassBytecode classBc;
         classBc.name = cls.name;
@@ -907,7 +1039,10 @@ Module Compiler::compile(const Program& program) {
 
     for (const auto& fn : program.functions) {
         if (funcIndex.contains(fn.name)) {
-            throw std::runtime_error("Duplicate function name: " + fn.name);
+            throw std::runtime_error(formatCompilerError("Duplicate function name: " + fn.name,
+                                                         "<module>",
+                                                         fn.line,
+                                                         fn.column));
         }
         FunctionBytecode compiled;
         compiled.name = fn.name;
@@ -918,23 +1053,32 @@ Module Compiler::compile(const Program& program) {
         module.functions.push_back(std::move(compiled));
     }
 
-    for (const auto& stmt : program.topLevelLets) {
+    const std::string moduleInitName = "__module_init__";
+    if (!funcIndex.contains(moduleInitName)) {
+        FunctionBytecode moduleInit;
+        moduleInit.name = moduleInitName;
+        moduleInit.localCount = 0;
+        funcIndex[moduleInitName] = module.functions.size();
+        module.functions.push_back(std::move(moduleInit));
+    }
+
+    std::unordered_set<std::string> declaredModuleGlobals;
+    for (const auto& stmt : program.topLevelStatements) {
+        if (stmt.type != StmtType::LetExpr) {
+            continue;
+        }
+
         if (funcIndex.contains(stmt.name) || classIndex.contains(stmt.name)) {
-            throw std::runtime_error("Duplicate top-level symbol name: " + stmt.name);
+            throw std::runtime_error(formatCompilerError("Duplicate top-level symbol name: " + stmt.name,
+                                                         "<module>",
+                                                         stmt.line,
+                                                         stmt.column));
         }
 
-        bool exists = false;
-        for (const auto& g : module.globals) {
-            if (g.name == stmt.name) {
-                exists = true;
-                break;
-            }
+        if (!declaredModuleGlobals.contains(stmt.name)) {
+            module.globals.push_back({stmt.name, Value::Nil()});
+            declaredModuleGlobals.insert(stmt.name);
         }
-        if (exists) {
-            throw std::runtime_error("Duplicate top-level variable name: " + stmt.name);
-        }
-
-        module.globals.push_back({stmt.name, evalGlobalInit(stmt.expr, module, funcIndex, classIndex)});
     }
 
     for (const auto& cls : program.classes) {
@@ -942,13 +1086,20 @@ Module Compiler::compile(const Program& program) {
         if (!cls.baseName.empty()) {
             auto it = classIndex.find(cls.baseName);
             if (it == classIndex.end()) {
-                throw std::runtime_error("Unknown base class: " + cls.baseName);
+                throw std::runtime_error(formatCompilerError("Unknown base class: " + cls.baseName,
+                                                             "<module>",
+                                                             cls.line,
+                                                             cls.column));
             }
             classBc.baseClassIndex = static_cast<std::int32_t>(it->second);
         }
 
         for (const auto& attr : cls.attributes) {
-            classBc.attributes.push_back({attr.name, evalClassFieldInit(attr.initializer, module, funcIndex, classIndex)});
+            classBc.attributes.push_back({attr.name, evalClassFieldInit(attr.initializer,
+                                                                        module,
+                                                                        funcIndex,
+                                                                        classIndex,
+                                                                        cls.name + "::<attr>" )});
         }
 
         bool hasCtor = false;
@@ -956,13 +1107,19 @@ Module Compiler::compile(const Program& program) {
             if (method.name == "__new__") {
                 hasCtor = true;
                 if (method.params.empty()) {
-                    throw std::runtime_error("Class constructor __new__ must declare self parameter: " + cls.name);
+                    throw std::runtime_error(formatCompilerError("Class constructor __new__ must declare self parameter: " + cls.name,
+                                                                 cls.name + "::__new__",
+                                                                 method.line,
+                                                                 method.column));
                 }
             }
 
             const std::string mangled = mangleMethodName(cls.name, method.name);
             if (funcIndex.contains(mangled)) {
-                throw std::runtime_error("Duplicate method: " + mangled);
+                throw std::runtime_error(formatCompilerError("Duplicate method: " + mangled,
+                                                             mangled,
+                                                             method.line,
+                                                             method.column));
             }
             FunctionBytecode compiled;
             compiled.name = mangled;
@@ -975,7 +1132,10 @@ Module Compiler::compile(const Program& program) {
         }
 
         if (!hasCtor) {
-            throw std::runtime_error("Class must define constructor __new__: " + cls.name);
+            throw std::runtime_error(formatCompilerError("Class must define constructor __new__: " + cls.name,
+                                                         cls.name,
+                                                         cls.line,
+                                                         cls.column));
         }
     }
 
@@ -986,7 +1146,7 @@ Module Compiler::compile(const Program& program) {
             locals[out.params[i]] = i;
         }
 
-        compileStatements(fn.body, module, locals, funcIndex, classIndex, out, nullptr);
+        compileStatements(fn.body, module, locals, funcIndex, classIndex, fn.name, false, out, nullptr);
 
         if (out.code.empty() || out.code.back().op != OpCode::Return) {
             emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
@@ -1003,12 +1163,38 @@ Module Compiler::compile(const Program& program) {
                 locals[out.params[i]] = i;
             }
 
-            compileStatements(method.body, module, locals, funcIndex, classIndex, out, nullptr);
+            compileStatements(method.body,
+                              module,
+                              locals,
+                              funcIndex,
+                              classIndex,
+                              cls.name + "::" + method.name,
+                              false,
+                              out,
+                              nullptr);
 
             if (out.code.empty() || out.code.back().op != OpCode::Return) {
                 emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
                 emit(out.code, OpCode::Return);
             }
+        }
+    }
+
+    {
+        FunctionBytecode& out = module.functions[funcIndex.at(moduleInitName)];
+        std::unordered_map<std::string, std::size_t> locals;
+        compileStatements(program.topLevelStatements,
+                          module,
+                          locals,
+                          funcIndex,
+                          classIndex,
+                          moduleInitName,
+                          true,
+                          out,
+                          nullptr);
+        if (out.code.empty() || out.code.back().op != OpCode::Return) {
+            emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+            emit(out.code, OpCode::Return);
         }
     }
 
@@ -1022,12 +1208,102 @@ Module compileSource(const std::string& source) {
     return compiler.compile(parser.parseProgram());
 }
 
-Module compileSourceFile(const std::string& path, const std::vector<std::string>& searchPaths) {
-    std::unordered_map<std::string, ProcessedModule> cache;
-    std::unordered_set<std::string> visiting;
-    const auto processed = preprocessImportsRecursive(path, searchPaths, cache, visiting);
-    const std::string& mergedSource = processed.source;
-    return compileSource(mergedSource);
+void dumpTransformedSourceFile(const std::string& sourcePath, const std::string& transformedSource) {
+    namespace fs = std::filesystem;
+    fs::path outputPath(sourcePath);
+    outputPath.replace_extension(".gst");
+
+    std::ofstream output(outputPath, std::ios::binary);
+    if (!output) {
+        throw std::runtime_error("error: failed to dump transformed source to " + outputPath.string() + " [function: <module>]");
+    }
+    output << transformedSource;
+    if (!output) {
+        throw std::runtime_error("error: failed to write transformed source to " + outputPath.string() + " [function: <module>]");
+    }
+}
+
+std::string inferFunctionNameAtLine(const std::string& source, std::size_t lineNo) {
+    static const std::regex fnHeaderRe(R"(^\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{)");
+    const auto lines = splitLines(source);
+    if (lineNo == 0 || lineNo > lines.size()) {
+        return "<module>";
+    }
+
+    std::string currentFunction = "<module>";
+    int depth = 0;
+    int functionDepth = 0;
+
+    for (std::size_t i = 0; i < lineNo; ++i) {
+        const auto& line = lines[i];
+        std::smatch match;
+        bool functionStartsHere = std::regex_search(line, match, fnHeaderRe);
+
+        for (char c : line) {
+            if (c == '{') {
+                ++depth;
+            } else if (c == '}') {
+                --depth;
+            }
+        }
+
+        if (functionStartsHere) {
+            currentFunction = match[1].str();
+            functionDepth = depth;
+        }
+
+        if (currentFunction != "<module>" && depth < functionDepth) {
+            currentFunction = "<module>";
+            functionDepth = 0;
+        }
+    }
+
+    return currentFunction;
+}
+
+std::string tryFillFunctionContext(const std::string& diagnostic, const std::string& source) {
+    if (diagnostic.find("[function: <module>]") == std::string::npos) {
+        return diagnostic;
+    }
+
+    std::smatch match;
+    static const std::regex lineColRe(R"(^\s*(\d+):(\d+):\s*error:.*\[function:\s*<module>\]\s*$)");
+    if (!std::regex_match(diagnostic, match, lineColRe)) {
+        return diagnostic;
+    }
+
+    const std::size_t lineNo = static_cast<std::size_t>(std::stoull(match[1].str()));
+    const std::string inferredFunction = inferFunctionNameAtLine(source, lineNo);
+    if (inferredFunction == "<module>") {
+        return diagnostic;
+    }
+
+    std::string updated = diagnostic;
+    const std::string oldTag = "[function: <module>]";
+    const std::string newTag = "[function: " + inferredFunction + "]";
+    const auto pos = updated.find(oldTag);
+    if (pos != std::string::npos) {
+        updated.replace(pos, oldTag.size(), newTag);
+    }
+    return updated;
+}
+
+Module compileSourceFile(const std::string& path,
+                         const std::vector<std::string>& searchPaths,
+                         bool dumpTransformedSource) {
+    std::string mergedSource;
+    try {
+        std::unordered_map<std::string, ProcessedModule> cache;
+        std::unordered_set<std::string> visiting;
+        const auto processed = preprocessImportsRecursive(path, searchPaths, cache, visiting);
+        mergedSource = processed.source;
+        if (dumpTransformedSource) {
+            dumpTransformedSourceFile(path, mergedSource);
+        }
+        return compileSource(mergedSource);
+    } catch (const std::exception& ex) {
+        throw std::runtime_error(path + ":" + tryFillFunctionContext(ex.what(), mergedSource));
+    }
 }
 
 std::string serializeModuleText(const Module& module) {
@@ -1229,6 +1505,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             case OpCode::PushConst: out << "PushConst"; break;
             case OpCode::LoadLocal: out << "LoadLocal"; break;
             case OpCode::LoadName: out << "LoadName"; break;
+            case OpCode::StoreName: out << "StoreName"; break;
             case OpCode::StoreLocal: out << "StoreLocal"; break;
             case OpCode::Add: out << "Add"; break;
             case OpCode::Sub: out << "Sub"; break;

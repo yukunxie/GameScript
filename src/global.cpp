@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -68,37 +69,67 @@ void printValues(HostContext& context,
     }
 }
 
-std::shared_ptr<Module> createSystemBuiltinModule() {
-    return std::make_shared<Module>();
+std::string formatAssertMessage(HostContext& context,
+                                const std::string& format,
+                                const std::vector<Value>& args,
+                                std::size_t argStart) {
+    std::ostringstream out;
+    std::size_t i = 0;
+    std::size_t argIndex = argStart;
+    while (i < format.size()) {
+        if (format[i] == '{' && i + 1 < format.size() && format[i + 1] == '}') {
+            if (argIndex < args.size()) {
+                out << context.__str__(args[argIndex++]);
+            } else {
+                out << "{}";
+            }
+            i += 2;
+            continue;
+        }
+        out << format[i];
+        ++i;
+    }
+
+    while (argIndex < args.size()) {
+        if (out.tellp() > 0) {
+            out << ' ';
+        }
+        out << context.__str__(args[argIndex++]);
+    }
+    return out.str();
 }
 
 } // namespace
 
 void bindGlobalModule(HostRegistry& host) {
-    host.bind("Module", [](HostContext& context, const std::vector<Value>& args) -> Value {
-        if (args.size() > 1) {
-            throw std::runtime_error("Module() accepts 0 or 1 argument");
+    host.bind("loadModule", [&host](HostContext& context, const std::vector<Value>& args) -> Value {
+        if (args.empty()) {
+            throw std::runtime_error("loadModule() accepts at least one argument");
         }
-        std::string moduleName = "module";
-        if (args.size() == 1) {
-            moduleName = context.__str__(args[0]);
+        const std::string moduleName = context.__str__(args[0]);
+
+        for (std::size_t i = 1; i < args.size(); ++i) {
+            (void)context.__str__(args[i]);
         }
 
         static ModuleType moduleType;
         static NativeFunctionType nativeFunctionType;
-        if (moduleName == "system") {
-            static std::shared_ptr<Module> systemModule = createSystemBuiltinModule();
-            auto moduleObject = std::make_unique<ModuleObject>(moduleType, moduleName, systemModule);
-            moduleObject->exports()["gc"] = context.createObject(std::make_unique<NativeFunctionObject>(nativeFunctionType,
-                                                                                                           "gc",
-                                                                                                           [](HostContext& ctx, const std::vector<Value>& fnArgs) -> Value {
-                                                                                                               const std::int64_t generation = fnArgs.empty() ? 1 : fnArgs[0].asInt();
-                                                                                                               if (fnArgs.size() > 1) {
-                                                                                                                   throw std::runtime_error("system.gc() accepts zero or one argument");
-                                                                                                               }
-                                                                                                               return ctx.collectGarbage(generation);
-                                                                                                           }));
-            return context.createObject(std::move(moduleObject));
+
+        if (host.hasModule(moduleName)) {
+            const std::string builtinKey = "builtin:" + moduleName;
+            Value cached = Value::Nil();
+            if (context.tryGetCachedModuleObject(builtinKey, cached)) {
+                context.ensureModuleInitialized(cached);
+                return cached;
+            }
+
+            Value moduleRef = host.resolveBuiltin(moduleName,
+                                                  context,
+                                                  nativeFunctionType,
+                                                  moduleType);
+            context.cacheModuleObject(builtinKey, moduleRef);
+            context.ensureModuleInitialized(moduleRef);
+            return moduleRef;
         }
 
         const std::string modulePath = resolveModulePath(moduleName);
@@ -113,7 +144,17 @@ void bindGlobalModule(HostRegistry& host) {
             it = moduleCache.emplace(modulePath, std::move(compiled)).first;
         }
 
-        return context.createObject(std::make_unique<ModuleObject>(moduleType, moduleName, it->second));
+        const std::string moduleKey = "file:" + modulePath;
+        Value cached = Value::Nil();
+        if (context.tryGetCachedModuleObject(moduleKey, cached)) {
+            context.ensureModuleInitialized(cached);
+            return cached;
+        }
+
+        Value moduleRef = context.createObject(std::make_unique<ModuleObject>(moduleType, moduleName, it->second));
+        context.cacheModuleObject(moduleKey, moduleRef);
+        context.ensureModuleInitialized(moduleRef);
+        return moduleRef;
     });
 
     host.bind("print", [](HostContext& context, const std::vector<Value>& args) -> Value {
@@ -150,6 +191,26 @@ void bindGlobalModule(HostRegistry& host) {
             throw std::runtime_error("id() overflow");
         }
         return Value::Int(static_cast<std::int64_t>(idValue));
+    });
+
+    host.bind("assert", [](HostContext& context, const std::vector<Value>& args) -> Value {
+        if (args.empty()) {
+            throw std::runtime_error("assert(condition, format, args...) requires at least condition");
+        }
+
+        const bool condition = args[0].asInt() != 0;
+        if (condition) {
+            return Value::Int(1);
+        }
+
+        std::string message = "assert failed";
+        if (args.size() >= 2) {
+            message = formatAssertMessage(context,
+                                          context.__str__(args[1]),
+                                          args,
+                                          2);
+        }
+        throw std::runtime_error("assertion failed: " + message);
     });
 }
 

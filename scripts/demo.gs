@@ -1,101 +1,163 @@
 import object.creatures as creatures;
 import misc.flow as flow;
+import module_math as mm;
+import module_globals as mg;
 import system as system;
+from module_math import add as plus;
 
-# fn tick() {
-#     return flow.tick();
-# }
+let TOP_LEVEL_SENTINEL = 314;
 
-let agggg = 10;
+fn test_arithmetic_and_string() {
+    let x = 40 + 2;
+    assert(x == 42, "x expected 42, actual {}", x);
 
-fn main() {
+    let y = x * 2 - 20;
+    assert(y == 64, "y expected 64, actual {}", y);
 
-    print ("hello world", agggg);
-    let base = 40 + 2;
-    print(base);
-    let baseStr = str(base);
-    print(baseStr);
+    let s = str(y);
+    assert(s == "64", "str(y) expected 64, actual {}", s);
+    return 1;
+}
 
-    print("loop start");
-    let loopTotal = flow.loop_demo();
-    print(loopTotal);
-    print("loop end");
-
-    let dict = {};
-    dict[1] = base;
-    print("dict1", dict);
-    let oldValue = dict[1];
-    print("[index]", oldValue);
-    dict[1] = oldValue + 1;
-    let removedDict = dict.del(1);
-    
-
-    print ("dict", dict);
-
+fn test_list_and_dict() {
     let list = [];
     list.push(10);
     list.push(20);
     list.push(5);
-    let first = list[0];
-    print(first);
-    list[1] = base;
     list.sort();
-    print("list(sorted)", list);
-    let removedList = list.remove(1);
-    print(removedList);
 
-    let majorReclaimed = system.gc();
-    print("gc(major-default)", majorReclaimed);
-    system.mydata = base;
-    print("system.mydata", system.mydata);
+    assert(list.size() == 3, "list size expected 3, actual {}", list.size());
+    assert(list[0] == 5, "list[0] expected 5, actual {}", list[0]);
 
-    # let task = spawn worker(base);
-    # let result = await task;
+    let removed = list.remove(1);
+    assert(removed == 10, "removed expected 10, actual {}", removed);
+    assert(list.size() == 2, "list size expected 2, actual {}", list.size());
 
+    let dict = {};
+    dict[1] = 100;
+    dict[2] = 200;
+    assert(dict[1] == 100, "dict[1] expected 100, actual {}", dict[1]);
+    let deleted = dict.del(2);
+    assert(deleted == 200, "dict.del(2) expected 200, actual {}", deleted);
+    assert(dict.size() == 1, "dict size expected 1, actual {}", dict.size());
+    return 1;
+}
+
+fn test_loops_and_control_flow() {
+    let rangeSum = 0;
+    for (i in range(0, 10)) {
+        let rangeSum = rangeSum + i;
+    }
+    assert(rangeSum == 45, "range sum expected 45, actual {}", rangeSum);
+
+    let list = [1, 2, 3, 4];
+    let listSum = 0;
+    for (v in list) {
+        let listSum = listSum + v;
+    }
+    assert(listSum == 10, "list sum expected 10, actual {}", listSum);
+
+    let dict = {1: 7, 2: 8, 3: 9};
+    let dictSum = 0;
+    for (k, v in dict) {
+        let dictSum = dictSum + v;
+    }
+    assert(dictSum == 24, "dict values sum expected 24, actual {}", dictSum);
+
+    let i = 0;
+    let whileSum = 0;
+    while (i < 10) {
+        let i = i + 1;
+        if (i == 3) {
+            continue;
+        }
+        if (i > 7) {
+            break;
+        }
+        let whileSum = whileSum + i;
+    }
+    assert(whileSum == 25, "while sum expected 25, actual {}", whileSum);
+    return 1;
+}
+
+fn test_modules_and_imports() {
+    assert(TOP_LEVEL_SENTINEL == 314, "top-level sentinel mismatch: {}", TOP_LEVEL_SENTINEL);
+    assert(mg.G == 123, "module global G expected 123, actual {}", mg.G);
+    assert(mg.getG() == 123, "mg.getG expected 123, actual {}", mg.getG());
+    assert(mg.getDouble() == 246, "mg.getDouble expected 246, actual {}", mg.getDouble());
+
+    assert(mm.add(2, 3) == 5, "mm.add expected 5, actual {}", mm.add(2, 3));
+    assert(plus(4, 5) == 9, "plus expected 9, actual {}", plus(4, 5));
+    assert(flow.loop_demo() == 10, "flow.loop_demo expected 10, actual {}", flow.loop_demo());
+    return 1;
+}
+
+fn test_classes_and_host_objects() {
     let animal = creatures.Animal();
     let dog = creatures.Dog();
-    print("type(animal)", type(animal));
-    print("type(dog)", type(dog));
-    print(str(animal));
-    print(animal.__str__());
-    print(str(dog));
-    print(dog.__str__());
+    assert(type(animal) == "Animal", "animal type expected Animal, actual {}", type(animal));
+    assert(type(dog) == "Dog", "dog type expected Dog, actual {}", type(dog));
 
+    assert(animal.speak() == 1, "animal.speak expected 1, actual {}", animal.speak());
     dog.VoiceFn = creatures.animalVoice;
-
-    print(animal.Name);
-    print(dog.Name);
-    print(animal.speak());
-    print("dog.speak", dog.speak());
-    print("dog.VoiceFn", dog.VoiceFn());
+    assert(dog.speak() == 1, "dog.speak expected 1 after override, actual {}", dog.speak());
 
     let p = Vec2(9, 8);
-    
-    print(str(p));
-    print(p.__str__());
-    print(p.x);
-    p.y = 23.0;
-    print("p", p);
-    print("px, py", p.x, p.y);
-
-    let s = "dsjfkdfj";
-    print ("str", s);
+    assert(p.x == 9, "Vec2.x expected 9, actual {}", p.x);
+    p.y = 23;
+    assert(p.y == 23, "Vec2.y expected 23, actual {}", p.y);
 
     let e = Entity();
-    print(type(e));
-    print(str(e));
-    print(e.__str__());
-    print(e.HP);
+    assert(e.HP == 100, "Entity.HP expected 100, actual {}", e.HP);
     e.HP = 135;
     e.MP = 88;
-    e.GotoPoint(p);
-    e.Speed = 9.0;
+    e.Speed = 9;
     e.Position = p;
-    print(e.HP);
-    print ("id(e)", type(id(e)));
+    e.GotoPoint(p);
+    assert(e.HP == 135, "Entity.HP expected 135, actual {}", e.HP);
+    assert(type(id(e)) == "int", "type(id(e)) expected int, actual {}", type(id(e)));
+    return 1;
+}
 
-    
+fn benchmark_hot_loop() {
+    let total = 0;
+    for (i in range(0, 10000)) {
+        let total = total + i;
+    }
+    assert(total == 49995000, "hot loop checksum mismatch: {}", total);
+    return total;
+}
 
-    #print(result);
-    #return result;
+fn benchmark_module_calls() {
+    let total = 0;
+    for (i in range(0, 2000)) {
+        let total = total + mm.add(i, 1);
+    }
+    assert(total == 2001000, "module-call benchmark checksum mismatch: {}", total);
+    return total;
+}
+
+fn main() {
+    print("[bench] suite start");
+
+    let passed = 0;
+    let passed = passed + test_arithmetic_and_string();
+    let passed = passed + test_list_and_dict();
+    let passed = passed + test_loops_and_control_flow();
+    let passed = passed + test_modules_and_imports();
+    let passed = passed + test_classes_and_host_objects();
+
+    let checksum1 = benchmark_hot_loop();
+    let checksum2 = benchmark_module_calls();
+    let reclaimed = system.gc();
+    assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
+
+    print("[bench] passed groups", passed);
+    print("[bench] checksum1", checksum1);
+    print("[bench] checksum2", checksum2);
+    print("[bench] gc", reclaimed);
+    print("[bench] suite done");
+
+    assert(passed == 5, "passed groups expected 5, actual {}", passed);
+    return 0;
 }

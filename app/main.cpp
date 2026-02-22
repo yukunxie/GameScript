@@ -3,8 +3,11 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -276,6 +279,39 @@ namespace MyGame
 #undef GS_EXPORT_METHOD
 }
 
+namespace {
+
+void printErrorSourceCaret(const std::string& diagnostic) {
+    static const std::regex clangStyleRe(R"(^(.*):(\d+):(\d+):\s*error:.*$)");
+    std::smatch match;
+    if (!std::regex_match(diagnostic, match, clangStyleRe)) {
+        return;
+    }
+
+    const std::filesystem::path filePath = match[1].str();
+    const std::size_t lineNo = static_cast<std::size_t>(std::stoull(match[2].str()));
+    const std::size_t columnNo = static_cast<std::size_t>(std::stoull(match[3].str()));
+
+    std::ifstream input(filePath);
+    if (!input) {
+        return;
+    }
+
+    std::string line;
+    for (std::size_t current = 1; current <= lineNo; ++current) {
+        if (!std::getline(input, line)) {
+            return;
+        }
+    }
+
+    const std::string linePrefix = std::to_string(lineNo) + " | ";
+    std::cerr << linePrefix << line << '\n';
+    const std::size_t caretPos = columnNo > 0 ? (columnNo - 1) : 0;
+    std::cerr << std::string(linePrefix.size() + caretPos, ' ') << "^" << '\n';
+}
+
+} // namespace
+
 int main() {
     gs::Runtime runtime;
     MyGame::ScriptExports exports;
@@ -292,7 +328,13 @@ int main() {
     };
 
     if (!runtime.loadSourceFile(scriptName, searchPaths)) {
-        std::cerr << "Load source failed: " << scriptName << '\n';
+        std::cerr << "Load source failed: " << scriptName;
+        if (!runtime.lastError().empty()) {
+            std::cerr << "\n" << runtime.lastError();
+            std::cerr << '\n';
+            printErrorSourceCaret(runtime.lastError());
+        }
+        std::cerr << '\n';
         return 1;
     }
 

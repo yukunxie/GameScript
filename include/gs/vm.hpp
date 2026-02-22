@@ -65,6 +65,11 @@ struct ExecutionContext {
     bool deleteHooksRan{false};
     std::shared_ptr<const Module> modulePin;
     std::vector<std::string> stringPool;
+    std::unordered_map<const Module*, std::unordered_map<std::string, Value>> moduleRuntimeGlobals;
+    std::unordered_map<const Module*, Value> moduleRuntimeObjects;
+    std::unordered_set<const Module*> initializedModules;
+    std::unordered_set<const Module*> moduleInitInProgress;
+    std::unordered_map<std::string, Value> moduleObjectCache;
     std::unordered_map<std::uint64_t, std::unique_ptr<Object>> objectHeap;
     std::unordered_map<std::uint64_t, GcObjectMeta> gcMeta;
     std::unordered_map<Object*, std::uint64_t> objectPtrToId;
@@ -78,6 +83,7 @@ public:
                    TaskSystem& tasks);
 
     Value runFunction(const std::string& functionName, const std::vector<Value>& args = {});
+    void ensureModuleInitialized(ExecutionContext& context, const std::shared_ptr<const Module>& modulePin);
 
 private:
     std::size_t findFunctionIndex(const std::string& name) const;

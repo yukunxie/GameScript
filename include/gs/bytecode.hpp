@@ -149,6 +149,7 @@ enum class OpCode : std::uint8_t {
     PushConst,
     LoadLocal,
     LoadName,
+    StoreName,
     StoreLocal,
     Add,
     Sub,

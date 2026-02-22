@@ -1,5 +1,6 @@
 #include "gs/parser.hpp"
 
+#include <sstream>
 #include <stdexcept>
 
 namespace gs {
@@ -21,17 +22,31 @@ Program Parser::parseProgram() {
             program.classes.push_back(parseClass());
         } else if (check(TokenType::KeywordFn)) {
             program.functions.push_back(parseFunction());
-        } else if (check(TokenType::KeywordLet)) {
-            Stmt stmt = parseStatement();
-            if (stmt.type != StmtType::LetExpr) {
-                throw std::runtime_error("Top-level let only supports direct expression assignment");
-            }
-            program.topLevelLets.push_back(std::move(stmt));
         } else {
-            throw std::runtime_error("Top-level statement must be class, fn, or let");
+            Stmt stmt = parseStatement();
+            program.topLevelStatements.push_back(std::move(stmt));
         }
     }
     return program;
+}
+
+std::string Parser::currentScopeName() const {
+    if (!currentClassName_.empty() && !currentFunctionName_.empty()) {
+        return currentClassName_ + "::" + currentFunctionName_;
+    }
+    if (!currentFunctionName_.empty()) {
+        return currentFunctionName_;
+    }
+    return "<module>";
+}
+
+std::string Parser::formatParseError(const char* message, const Token& token) const {
+    std::ostringstream out;
+    out << token.line
+        << ":" << token.column
+        << ": error: " << message
+        << " [function: " << currentScopeName() << "]";
+    return out.str();
 }
 
 const Token& Parser::peek() const {
@@ -66,29 +81,43 @@ const Token& Parser::consume(TokenType type, const char* message) {
         ++current_;
         return previous();
     }
-    throw std::runtime_error(message);
+
+    const Token* errorToken = &peek();
+    if (type == TokenType::Semicolon && current_ > 0) {
+        errorToken = &previous();
+    }
+    throw std::runtime_error(formatParseError(message, *errorToken));
 }
 
 ClassDecl Parser::parseClass() {
     consume(TokenType::KeywordClass, "Expected 'class'");
     ClassDecl cls;
-    cls.name = consume(TokenType::Identifier, "Expected class name").text;
+    const Token& classNameToken = consume(TokenType::Identifier, "Expected class name");
+    cls.name = classNameToken.text;
+    cls.line = classNameToken.line;
+    cls.column = classNameToken.column;
     if (match(TokenType::KeywordExtends)) {
         cls.baseName = consume(TokenType::Identifier, "Expected base class name").text;
     }
     consume(TokenType::LBrace, "Expected '{' after class name");
+    const std::string previousClassName = currentClassName_;
+    currentClassName_ = cls.name;
     while (!check(TokenType::RBrace) && !isAtEnd()) {
         if (check(TokenType::KeywordFn)) {
             cls.methods.push_back(parseFunction());
         } else {
             ClassAttrDecl attr;
-            attr.name = consume(TokenType::Identifier, "Expected attribute name").text;
+            const Token& attrToken = consume(TokenType::Identifier, "Expected attribute name");
+            attr.name = attrToken.text;
+            attr.line = attrToken.line;
+            attr.column = attrToken.column;
             consume(TokenType::Equal, "Expected '=' after attribute name");
             attr.initializer = parseExpression();
             consume(TokenType::Semicolon, "Expected ';' after attribute declaration");
             cls.attributes.push_back(std::move(attr));
         }
     }
+    currentClassName_ = previousClassName;
     consume(TokenType::RBrace, "Expected '}' after class body");
     return cls;
 }
@@ -96,7 +125,12 @@ ClassDecl Parser::parseClass() {
 FunctionDecl Parser::parseFunction() {
     consume(TokenType::KeywordFn, "Expected 'fn'");
     FunctionDecl fn;
-    fn.name = consume(TokenType::Identifier, "Expected function name").text;
+    const Token& fnNameToken = consume(TokenType::Identifier, "Expected function name");
+    fn.name = fnNameToken.text;
+    fn.line = fnNameToken.line;
+    fn.column = fnNameToken.column;
+    const std::string previousFunctionName = currentFunctionName_;
+    currentFunctionName_ = fn.name;
     consume(TokenType::LParen, "Expected '('");
 
     if (!check(TokenType::RParen)) {
@@ -108,6 +142,7 @@ FunctionDecl Parser::parseFunction() {
     consume(TokenType::RParen, "Expected ')'");
     consume(TokenType::LBrace, "Expected '{'");
     fn.body = parseBlock();
+    currentFunctionName_ = previousFunctionName;
     return fn;
 }
 
@@ -138,6 +173,8 @@ Expr Parser::parsePostfix(Expr expr) {
         if (match(TokenType::LParen)) {
             Expr call;
             call.type = ExprType::Call;
+            call.line = expr.line;
+            call.column = expr.column;
             call.callee = std::make_unique<Expr>(std::move(expr));
             if (!check(TokenType::RParen)) {
                 do {
@@ -154,6 +191,8 @@ Expr Parser::parsePostfix(Expr expr) {
             if (match(TokenType::LParen)) {
                 Expr methodCall;
                 methodCall.type = ExprType::MethodCall;
+                methodCall.line = expr.line;
+                methodCall.column = expr.column;
                 methodCall.object = std::make_unique<Expr>(std::move(expr));
                 methodCall.methodName = memberName;
                 if (!check(TokenType::RParen)) {
@@ -168,6 +207,8 @@ Expr Parser::parsePostfix(Expr expr) {
 
             Expr prop;
             prop.type = ExprType::PropertyAccess;
+            prop.line = expr.line;
+            prop.column = expr.column;
             prop.object = std::make_unique<Expr>(std::move(expr));
             prop.propertyName = memberName;
             expr = std::move(prop);
@@ -177,6 +218,8 @@ Expr Parser::parsePostfix(Expr expr) {
         if (match(TokenType::LBracket)) {
             Expr indexAccess;
             indexAccess.type = ExprType::IndexAccess;
+            indexAccess.line = expr.line;
+            indexAccess.column = expr.column;
             indexAccess.object = std::make_unique<Expr>(std::move(expr));
             indexAccess.index = std::make_unique<Expr>(parseExpression());
             consume(TokenType::RBracket, "Expected ']' after index expression");
@@ -191,10 +234,13 @@ Expr Parser::parsePostfix(Expr expr) {
 }
 
 Stmt Parser::parseForStatement() {
+    const Token& forToken = previous();
     consume(TokenType::LParen, "Expected '(' after for");
     const std::string firstName = consume(TokenType::Identifier, "Expected loop variable").text;
 
     Stmt stmt;
+    stmt.line = forToken.line;
+    stmt.column = forToken.column;
     if (match(TokenType::Comma)) {
         stmt.type = StmtType::ForDict;
         stmt.iterKey = firstName;
@@ -235,8 +281,11 @@ Stmt Parser::parseForStatement() {
 }
 
 Stmt Parser::parseIfStatement() {
+    const Token& ifToken = previous();
     Stmt stmt;
     stmt.type = StmtType::If;
+    stmt.line = ifToken.line;
+    stmt.column = ifToken.column;
 
     consume(TokenType::LParen, "Expected '(' after if");
     stmt.branchConditions.push_back(parseExpression());
@@ -261,8 +310,11 @@ Stmt Parser::parseIfStatement() {
 }
 
 Stmt Parser::parseWhileStatement() {
+    const Token& whileToken = previous();
     Stmt stmt;
     stmt.type = StmtType::While;
+    stmt.line = whileToken.line;
+    stmt.column = whileToken.column;
 
     consume(TokenType::LParen, "Expected '(' after while");
     stmt.condition = parseExpression();
@@ -275,7 +327,10 @@ Stmt Parser::parseWhileStatement() {
 
 Stmt Parser::parseStatement() {
     if (match(TokenType::KeywordLet)) {
+        const Token& letToken = previous();
         Stmt stmt;
+        stmt.line = letToken.line;
+        stmt.column = letToken.column;
         stmt.name = consume(TokenType::Identifier, "Expected variable name").text;
         consume(TokenType::Equal, "Expected '='");
         if (match(TokenType::KeywordSpawn)) {
@@ -305,38 +360,53 @@ Stmt Parser::parseStatement() {
     }
 
     if (match(TokenType::KeywordBreak)) {
+        const Token& breakToken = previous();
         Stmt stmt;
         stmt.type = StmtType::Break;
+        stmt.line = breakToken.line;
+        stmt.column = breakToken.column;
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
 
     if (match(TokenType::KeywordContinue)) {
+        const Token& continueToken = previous();
         Stmt stmt;
         stmt.type = StmtType::Continue;
+        stmt.line = continueToken.line;
+        stmt.column = continueToken.column;
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
 
     if (match(TokenType::KeywordReturn)) {
+        const Token& returnToken = previous();
         Stmt stmt;
         stmt.type = StmtType::Return;
+        stmt.line = returnToken.line;
+        stmt.column = returnToken.column;
         stmt.expr = parseExpression();
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
 
     if (match(TokenType::KeywordSleep)) {
+        const Token& sleepToken = previous();
         Stmt stmt;
         stmt.type = StmtType::Sleep;
+        stmt.line = sleepToken.line;
+        stmt.column = sleepToken.column;
         stmt.sleepMs = Value::Int(parseNumericLiteral(consume(TokenType::Number, "Expected millisecond number").text));
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
 
     if (match(TokenType::KeywordYield)) {
+        const Token& yieldToken = previous();
         Stmt stmt;
         stmt.type = StmtType::Yield;
+        stmt.line = yieldToken.line;
+        stmt.column = yieldToken.column;
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
@@ -344,6 +414,8 @@ Stmt Parser::parseStatement() {
     Stmt stmt;
     stmt.type = StmtType::Expr;
     stmt.expr = parseExpression();
+    stmt.line = stmt.expr.line;
+    stmt.column = stmt.expr.column;
     consume(TokenType::Semicolon, "Expected ';'");
     return stmt;
 }
@@ -362,6 +434,8 @@ Expr Parser::parseAssignment() {
     if (lhs.type == ExprType::PropertyAccess) {
         Expr expr;
         expr.type = ExprType::AssignProperty;
+        expr.line = lhs.line;
+        expr.column = lhs.column;
         expr.object = std::move(lhs.object);
         expr.propertyName = lhs.propertyName;
         expr.right = std::make_unique<Expr>(std::move(rhs));
@@ -371,13 +445,15 @@ Expr Parser::parseAssignment() {
     if (lhs.type == ExprType::IndexAccess) {
         Expr expr;
         expr.type = ExprType::AssignIndex;
+        expr.line = lhs.line;
+        expr.column = lhs.column;
         expr.object = std::move(lhs.object);
         expr.index = std::move(lhs.index);
         expr.right = std::make_unique<Expr>(std::move(rhs));
         return expr;
     }
 
-    throw std::runtime_error("Only object property or index assignment is supported");
+    throw std::runtime_error(formatParseError("Only object property or index assignment is supported", peek()));
 }
 
 Expr Parser::parseEquality() {
@@ -388,6 +464,8 @@ Expr Parser::parseEquality() {
 
         Expr merged;
         merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
         merged.binaryOp = op;
         merged.left = std::make_unique<Expr>(std::move(expr));
         merged.right = std::make_unique<Expr>(std::move(rhs));
@@ -405,6 +483,8 @@ Expr Parser::parseComparison() {
 
         Expr merged;
         merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
         merged.binaryOp = op;
         merged.left = std::make_unique<Expr>(std::move(expr));
         merged.right = std::make_unique<Expr>(std::move(rhs));
@@ -421,6 +501,8 @@ Expr Parser::parseTerm() {
 
         Expr merged;
         merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
         merged.binaryOp = op;
         merged.left = std::make_unique<Expr>(std::move(expr));
         merged.right = std::make_unique<Expr>(std::move(rhs));
@@ -437,6 +519,8 @@ Expr Parser::parseFactor() {
 
         Expr merged;
         merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
         merged.binaryOp = op;
         merged.left = std::make_unique<Expr>(std::move(expr));
         merged.right = std::make_unique<Expr>(std::move(rhs));
@@ -455,6 +539,8 @@ Expr Parser::parseUnary() {
 
         Expr merged;
         merged.type = ExprType::Binary;
+        merged.line = rhs.line;
+        merged.column = rhs.column;
         merged.binaryOp = TokenType::Minus;
         merged.left = std::make_unique<Expr>(std::move(zero));
         merged.right = std::make_unique<Expr>(std::move(rhs));
@@ -468,6 +554,8 @@ Expr Parser::parsePrimary() {
     if (match(TokenType::Number)) {
         Expr expr;
         expr.type = ExprType::Number;
+        expr.line = previous().line;
+        expr.column = previous().column;
         expr.value = Value::Int(parseNumericLiteral(previous().text));
         return parsePostfix(std::move(expr));
     }
@@ -475,13 +563,18 @@ Expr Parser::parsePrimary() {
     if (match(TokenType::String)) {
         Expr expr;
         expr.type = ExprType::StringLiteral;
+        expr.line = previous().line;
+        expr.column = previous().column;
         expr.stringLiteral = previous().text;
         return parsePostfix(std::move(expr));
     }
 
     if (match(TokenType::LBracket)) {
+        const Token& beginToken = previous();
         Expr expr;
         expr.type = ExprType::ListLiteral;
+        expr.line = beginToken.line;
+        expr.column = beginToken.column;
         if (!check(TokenType::RBracket)) {
             do {
                 expr.listElements.push_back(parseExpression());
@@ -492,8 +585,11 @@ Expr Parser::parsePrimary() {
     }
 
     if (match(TokenType::LBrace)) {
+        const Token& beginToken = previous();
         Expr expr;
         expr.type = ExprType::DictLiteral;
+        expr.line = beginToken.line;
+        expr.column = beginToken.column;
         if (!check(TokenType::RBrace)) {
             do {
                 DictEntry entry;
@@ -510,6 +606,8 @@ Expr Parser::parsePrimary() {
     if (match(TokenType::Identifier)) {
         Expr expr;
         expr.type = ExprType::Variable;
+        expr.line = previous().line;
+        expr.column = previous().column;
         expr.name = previous().text;
         return parsePostfix(std::move(expr));
     }
@@ -517,6 +615,8 @@ Expr Parser::parsePrimary() {
     if (match(TokenType::KeywordStr)) {
         Expr expr;
         expr.type = ExprType::Variable;
+        expr.line = previous().line;
+        expr.column = previous().column;
         expr.name = "str";
         return parsePostfix(std::move(expr));
     }
@@ -527,7 +627,7 @@ Expr Parser::parsePrimary() {
         return parsePostfix(std::move(expr));
     }
 
-    throw std::runtime_error("Expected expression");
+    throw std::runtime_error(formatParseError("Expected expression", peek()));
 }
 
 } // namespace gs

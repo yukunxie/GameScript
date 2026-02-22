@@ -59,9 +59,23 @@ HostRegistry& Runtime::host() {
     return hosts_;
 }
 
+const std::string& Runtime::lastError() const {
+    return lastError_;
+}
+
+void Runtime::setDumpTransformedSource(bool enabled) {
+    dumpTransformedSource_ = enabled;
+}
+
+bool Runtime::dumpTransformedSourceEnabled() const {
+    return dumpTransformedSource_;
+}
+
 bool Runtime::loadSourceFile(const std::string& path, const std::vector<std::string>& searchPaths) {
+    lastError_.clear();
     const auto resolvedPath = resolveSourcePath(path, searchPaths);
     if (resolvedPath.empty()) {
+        lastError_ = "Source file not found: " + path;
         return false;
     }
 
@@ -70,8 +84,14 @@ bool Runtime::loadSourceFile(const std::string& path, const std::vector<std::str
 
     Module compiled;
     try {
-        compiled = compileSourceFile(resolvedPath, importSearchPaths);
+        compiled = compileSourceFile(resolvedPath,
+                                     importSearchPaths,
+                                     dumpTransformedSource_);
+    } catch (const std::exception& ex) {
+        lastError_ = ex.what();
+        return false;
     } catch (...) {
+        lastError_ = "Unknown compile error";
         return false;
     }
 
@@ -84,8 +104,10 @@ bool Runtime::loadSourceFile(const std::string& path, const std::vector<std::str
 }
 
 bool Runtime::loadBytecodeFile(const std::string& path) {
+    lastError_.clear();
     const auto bc = readFile(path);
     if (bc.empty()) {
+        lastError_ = "Bytecode file not found or empty: " + path;
         return false;
     }
 

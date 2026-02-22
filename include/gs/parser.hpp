@@ -33,6 +33,8 @@ struct DictEntry {
 
 struct Expr {
     ExprType type{ExprType::Number};
+    std::size_t line{0};
+    std::size_t column{0};
     Value value{Value::Nil()};
     std::string name;
     std::string stringLiteral;
@@ -73,6 +75,8 @@ struct CallData {
 
 struct Stmt {
     StmtType type{StmtType::Yield};
+    std::size_t line{0};
+    std::size_t column{0};
     std::string name;
     Expr expr;
     CallData call;
@@ -92,17 +96,23 @@ struct Stmt {
 };
 
 struct FunctionDecl {
+    std::size_t line{0};
+    std::size_t column{0};
     std::string name;
     std::vector<std::string> params;
     std::vector<Stmt> body;
 };
 
 struct ClassAttrDecl {
+    std::size_t line{0};
+    std::size_t column{0};
     std::string name;
     Expr initializer;
 };
 
 struct ClassDecl {
+    std::size_t line{0};
+    std::size_t column{0};
     std::string name;
     std::string baseName;
     std::vector<ClassAttrDecl> attributes;
@@ -112,7 +122,7 @@ struct ClassDecl {
 struct Program {
     std::vector<ClassDecl> classes;
     std::vector<FunctionDecl> functions;
-    std::vector<Stmt> topLevelLets;
+    std::vector<Stmt> topLevelStatements;
 };
 
 class Parser {
@@ -145,9 +155,13 @@ private:
     Expr parseFactor();
     Expr parseUnary();
     Expr parsePrimary();
+    std::string currentScopeName() const;
+    std::string formatParseError(const char* message, const Token& token) const;
 
     std::vector<Token> tokens_;
     std::size_t current_{0};
+    std::string currentClassName_;
+    std::string currentFunctionName_;
 };
 
 } // namespace gs

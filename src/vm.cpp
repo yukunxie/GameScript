@@ -169,6 +169,24 @@ void markRoots(ExecutionContext& context, bool youngOnly) {
     }
     markValue(context, context.returnValue, youngOnly);
 
+    for (const auto& [modulePtr, globals] : context.moduleRuntimeGlobals) {
+        (void)modulePtr;
+        for (const auto& [name, value] : globals) {
+            (void)name;
+            markValue(context, value, youngOnly);
+        }
+    }
+
+    for (const auto& [modulePtr, moduleRef] : context.moduleRuntimeObjects) {
+        (void)modulePtr;
+        markValue(context, moduleRef, youngOnly);
+    }
+
+    for (const auto& [cacheKey, moduleRef] : context.moduleObjectCache) {
+        (void)cacheKey;
+        markValue(context, moduleRef, youngOnly);
+    }
+
     if (youngOnly) {
         for (const auto objectId : context.gc.rememberedSet) {
             (void)markObjectId(context, objectId, false, true);
@@ -501,7 +519,8 @@ bool valueEquals(const ExecutionContext& context, const Value& lhs, const Value&
 
 class VmHostContext final : public HostContext {
 public:
-    explicit VmHostContext(ExecutionContext& context) : context_(context) {}
+    explicit VmHostContext(ExecutionContext& context) : vm_(nullptr), context_(context) {}
+    VmHostContext(VirtualMachine& vm, ExecutionContext& context) : vm_(&vm), context_(context) {}
 
     Value createObject(std::unique_ptr<Object> object) override {
         return emplaceObject(context_, std::move(object));
@@ -548,7 +567,52 @@ public:
         return collectGarbageNow(context_, generation);
     }
 
+    void ensureModuleInitialized(const Value& moduleRef) override {
+        if (!moduleRef.isRef()) {
+            throw std::runtime_error("loadModule result is not an object reference");
+        }
+
+        Object& object = getObject(moduleRef);
+        auto* moduleObject = dynamic_cast<ModuleObject*>(&object);
+        if (!moduleObject) {
+            throw std::runtime_error("loadModule result is not a module object");
+        }
+
+        const auto modulePin = moduleObject->modulePin();
+        if (!modulePin) {
+            return;
+        }
+
+        context_.moduleRuntimeObjects[modulePin.get()] = moduleRef;
+        if (!vm_) {
+            throw std::runtime_error("Module initialization is unavailable in this host context");
+        }
+        vm_->ensureModuleInitialized(context_, modulePin);
+    }
+
+    bool tryGetCachedModuleObject(const std::string& moduleKey, Value& outModuleRef) override {
+        auto it = context_.moduleObjectCache.find(moduleKey);
+        if (it == context_.moduleObjectCache.end()) {
+            return false;
+        }
+        outModuleRef = it->second;
+        return true;
+    }
+
+    void cacheModuleObject(const std::string& moduleKey, const Value& moduleRef) override {
+        context_.moduleObjectCache[moduleKey] = moduleRef;
+        if (moduleRef.isRef()) {
+            Object& object = getObject(moduleRef);
+            if (auto* moduleObject = dynamic_cast<ModuleObject*>(&object)) {
+                if (moduleObject->modulePin()) {
+                    context_.moduleRuntimeObjects[moduleObject->modulePin().get()] = moduleRef;
+                }
+            }
+        }
+    }
+
 private:
+    VirtualMachine* vm_;
     ExecutionContext& context_;
 };
 
@@ -652,17 +716,27 @@ Value resolveRuntimeName(ExecutionContext& context,
         throw std::runtime_error("Frame module is null");
     }
 
+    auto moduleGlobalsIt = context.moduleRuntimeGlobals.find(frameModule.get());
+    if (moduleGlobalsIt != context.moduleRuntimeGlobals.end()) {
+        auto nameIt = moduleGlobalsIt->second.find(name);
+        if (nameIt != moduleGlobalsIt->second.end()) {
+            return nameIt->second;
+        }
+    }
+
     for (const auto& global : frameModule->globals) {
         if (global.name == name) {
-            return normalizeRuntimeValue(context,
-                                         functionType,
-                                         classType,
-                                         nativeFunctionType,
-                                         moduleType,
-                                         hosts,
-                                         frameModule,
-                                         global.initialValue,
-                                         true);
+            Value normalized = normalizeRuntimeValue(context,
+                                                     functionType,
+                                                     classType,
+                                                     nativeFunctionType,
+                                                     moduleType,
+                                                     hosts,
+                                                     frameModule,
+                                                     global.initialValue,
+                                                     true);
+            context.moduleRuntimeGlobals[frameModule.get()][name] = normalized;
+            return normalized;
         }
     }
 
@@ -679,12 +753,11 @@ Value resolveRuntimeName(ExecutionContext& context,
     }
 
     if (hosts.has(name)) {
-        return emplaceObject(context,
-                             std::make_unique<NativeFunctionObject>(nativeFunctionType,
-                                                                    name,
-                                                                    [name, hostsPtr = &hosts](HostContext& hostContext, const std::vector<Value>& callArgs) -> Value {
-                                                                        return hostsPtr->invoke(name, hostContext, callArgs);
-                                                                    }));
+        VmHostContext hostContext(context);
+        return hosts.resolveBuiltin(name,
+                                    hostContext,
+                                    nativeFunctionType,
+                                    moduleType);
     }
 
     throw std::runtime_error("Undefined symbol: " + name);
@@ -832,6 +905,48 @@ std::size_t VirtualMachine::findFunctionIndex(const std::string& name) const {
     throw std::runtime_error("Script function not found: " + name);
 }
 
+void VirtualMachine::ensureModuleInitialized(ExecutionContext& context, const std::shared_ptr<const Module>& modulePin) {
+    if (!modulePin) {
+        return;
+    }
+
+    const Module* moduleKey = modulePin.get();
+    if (context.initializedModules.contains(moduleKey)) {
+        return;
+    }
+    if (context.moduleInitInProgress.contains(moduleKey)) {
+        return;
+    }
+
+    std::size_t moduleInitIndex = static_cast<std::size_t>(-1);
+    for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
+        if (modulePin->functions[i].name == "__module_init__") {
+            moduleInitIndex = i;
+            break;
+        }
+    }
+
+    context.moduleInitInProgress.insert(moduleKey);
+    try {
+        if (moduleInitIndex != static_cast<std::size_t>(-1)) {
+            const std::size_t baseFrameCount = context.frames.size();
+            pushCallFrame(context, modulePin, moduleInitIndex, {});
+            std::size_t guard = 0;
+            while (context.frames.size() > baseFrameCount) {
+                if (++guard > 1000000) {
+                    throw std::runtime_error("Module initialization did not converge");
+                }
+                (void)execute(context, 1);
+            }
+        }
+        context.initializedModules.insert(moduleKey);
+        context.moduleInitInProgress.erase(moduleKey);
+    } catch (...) {
+        context.moduleInitInProgress.erase(moduleKey);
+        throw;
+    }
+}
+
 void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
                                    std::shared_ptr<const Module> modulePin,
                                    std::size_t functionIndex,
@@ -935,6 +1050,21 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             frame.locals.at(ins.a) = v;
             break;
         }
+        case OpCode::StoreName: {
+            const Value value = popValue(frame.stack);
+            const auto& symbolName = frameModule->strings.at(ins.a);
+            context.moduleRuntimeGlobals[frameModule.get()][symbolName] = value;
+
+            auto moduleRefIt = context.moduleRuntimeObjects.find(frameModule.get());
+            if (moduleRefIt != context.moduleRuntimeObjects.end() && moduleRefIt->second.isRef()) {
+                Object& moduleObjectBase = getObject(context, moduleRefIt->second);
+                if (auto* moduleObject = dynamic_cast<ModuleObject*>(&moduleObjectBase)) {
+                    rememberWriteBarrier(context, *moduleObject, value);
+                    moduleObject->exports()[symbolName] = value;
+                }
+            }
+            break;
+        }
         case OpCode::Add: {
             const Value rhs = popValue(frame.stack);
             const Value lhs = popValue(frame.stack);
@@ -1012,8 +1142,12 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
         case OpCode::CallHost: {
             const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
             const auto& name = frameModule->strings.at(ins.a);
-            VmHostContext hostContext(context);
-            frame.stack.push_back(hosts_.invoke(name, hostContext, args));
+            const std::size_t callerFrameIndex = context.frames.size() - 1;
+            VmHostContext hostContext(*this, context);
+            const Value result = hosts_.invoke(name, hostContext, args);
+            if (callerFrameIndex < context.frames.size()) {
+                context.frames[callerFrameIndex].stack.push_back(result);
+            }
             break;
         }
         case OpCode::CallFunc: {
@@ -1171,20 +1305,16 @@ load_attr_done:
             };
 
             if (auto* moduleObj = dynamic_cast<ModuleObject*>(&object)) {
-                const auto& modulePin = moduleObj->modulePin();
-                if (!modulePin) {
-                    throw std::runtime_error("Module object is not loaded: " + moduleObj->moduleName());
-                }
-
                 auto exportIt = moduleObj->exports().find(methodName);
                 if (exportIt != moduleObj->exports().end()) {
+                    const auto& exportModulePin = moduleObj->modulePin();
                     const Value callable = normalizeRuntimeValue(context,
                                                                  functionType_,
                                                                  classType_,
                                                                  nativeFunctionType_,
                                                                  moduleType_,
                                                                  hosts_,
-                                                                 modulePin,
+                                                                 exportModulePin,
                                                                  exportIt->second,
                                                                  false);
                     if (!valueEquals(context, exportIt->second, callable)) {
@@ -1198,7 +1328,10 @@ load_attr_done:
 
                     Object& callableObject = getObject(context, callable);
                     if (auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject)) {
-                        const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : modulePin;
+                        const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : exportModulePin;
+                        if (!callModule) {
+                            throw std::runtime_error("Module export function is missing module binding: " + methodName);
+                        }
                         pushCallFrame(context,
                                       callModule,
                                       fnObject->functionIndex(),
@@ -1244,12 +1377,21 @@ load_attr_done:
                     }
 
                     if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
-                        VmHostContext hostContext(context);
-                        frame.stack.push_back(nativeFunction->invoke(hostContext, args));
+                        const std::size_t callerFrameIndex = context.frames.size() - 1;
+                        VmHostContext hostContext(*this, context);
+                        const Value result = nativeFunction->invoke(hostContext, args);
+                        if (callerFrameIndex < context.frames.size()) {
+                            context.frames[callerFrameIndex].stack.push_back(result);
+                        }
                         goto call_method_done;
                     }
 
                     throw std::runtime_error("Module export is not function or class: " + methodName);
+                }
+
+                const auto& modulePin = moduleObj->modulePin();
+                if (!modulePin) {
+                    throw std::runtime_error("Module object is not loaded: " + moduleObj->moduleName());
                 }
 
                 for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
@@ -1438,8 +1580,12 @@ call_method_done:
             }
 
             if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
-                VmHostContext hostContext(context);
-                frame.stack.push_back(nativeFunction->invoke(hostContext, args));
+                const std::size_t callerFrameIndex = context.frames.size() - 1;
+                VmHostContext hostContext(*this, context);
+                const Value result = nativeFunction->invoke(hostContext, args);
+                if (callerFrameIndex < context.frames.size()) {
+                    context.frames[callerFrameIndex].stack.push_back(result);
+                }
                 break;
             }
 
@@ -1519,6 +1665,7 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
     ExecutionContext ctx;
     ctx.modulePin = module_;
     ctx.stringPool = module_->strings;
+    ensureModuleInitialized(ctx, module_);
     pushCallFrame(ctx, module_, findFunctionIndex(functionName), args);
 
     while (!execute(ctx, 1000)) {
