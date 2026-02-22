@@ -22,6 +22,7 @@ enum class ExprType {
     MethodCall,
     PropertyAccess,
     IndexAccess,
+    AssignVariable,
     AssignProperty,
     AssignIndex
 };

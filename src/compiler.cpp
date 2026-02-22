@@ -484,6 +484,232 @@ SymbolLookupResult resolveSymbol(const std::unordered_map<std::string, std::size
     return result;
 }
 
+void validateLocalUsageInExpr(const Expr& expr,
+                              const std::unordered_set<std::string>& localNames,
+                              const std::unordered_set<std::string>& declaredNames,
+                              const std::string& scopeName);
+
+void validateLocalUsageInStatements(const std::vector<Stmt>& statements,
+                                    const std::unordered_set<std::string>& localNames,
+                                    std::unordered_set<std::string>& declaredNames,
+                                    const std::string& scopeName) {
+    for (const auto& stmt : statements) {
+        switch (stmt.type) {
+        case StmtType::LetExpr:
+            declaredNames.insert(stmt.name);
+            validateLocalUsageInExpr(stmt.expr, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::LetSpawn:
+            declaredNames.insert(stmt.name);
+            break;
+        case StmtType::LetAwait:
+            declaredNames.insert(stmt.name);
+            if (localNames.contains(stmt.awaitSource) && !declaredNames.contains(stmt.awaitSource)) {
+                throw std::runtime_error(formatCompilerError("Local variable used before declaration: " + stmt.awaitSource,
+                                                             scopeName,
+                                                             stmt.line,
+                                                             stmt.column));
+            }
+            break;
+        case StmtType::ForRange:
+            validateLocalUsageInExpr(stmt.rangeStart, localNames, declaredNames, scopeName);
+            validateLocalUsageInExpr(stmt.rangeEnd, localNames, declaredNames, scopeName);
+            declaredNames.insert(stmt.iterKey);
+            validateLocalUsageInStatements(stmt.body, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::ForList:
+            validateLocalUsageInExpr(stmt.iterable, localNames, declaredNames, scopeName);
+            declaredNames.insert(stmt.iterKey);
+            validateLocalUsageInStatements(stmt.body, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::ForDict:
+            validateLocalUsageInExpr(stmt.iterable, localNames, declaredNames, scopeName);
+            declaredNames.insert(stmt.iterKey);
+            declaredNames.insert(stmt.iterValue);
+            validateLocalUsageInStatements(stmt.body, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::If:
+            for (const auto& condition : stmt.branchConditions) {
+                validateLocalUsageInExpr(condition, localNames, declaredNames, scopeName);
+            }
+            for (const auto& body : stmt.branchBodies) {
+                validateLocalUsageInStatements(body, localNames, declaredNames, scopeName);
+            }
+            validateLocalUsageInStatements(stmt.elseBody, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::While:
+            validateLocalUsageInExpr(stmt.condition, localNames, declaredNames, scopeName);
+            validateLocalUsageInStatements(stmt.body, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::Expr:
+        case StmtType::Return:
+            validateLocalUsageInExpr(stmt.expr, localNames, declaredNames, scopeName);
+            break;
+        case StmtType::Break:
+        case StmtType::Continue:
+        case StmtType::Sleep:
+        case StmtType::Yield:
+            break;
+        }
+    }
+}
+
+void validateLocalUsageInExpr(const Expr& expr,
+                              const std::unordered_set<std::string>& localNames,
+                              const std::unordered_set<std::string>& declaredNames,
+                              const std::string& scopeName) {
+    switch (expr.type) {
+    case ExprType::Variable:
+        if (localNames.contains(expr.name) && !declaredNames.contains(expr.name)) {
+            throw std::runtime_error(formatCompilerError("Local variable used before declaration: " + expr.name,
+                                                         scopeName,
+                                                         expr.line,
+                                                         expr.column));
+        }
+        return;
+    case ExprType::AssignVariable:
+        if (localNames.contains(expr.name) && !declaredNames.contains(expr.name)) {
+            throw std::runtime_error(formatCompilerError("Local variable used before declaration: " + expr.name,
+                                                         scopeName,
+                                                         expr.line,
+                                                         expr.column));
+        }
+        if (expr.right) {
+            validateLocalUsageInExpr(*expr.right, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::AssignProperty:
+        if (expr.object) {
+            validateLocalUsageInExpr(*expr.object, localNames, declaredNames, scopeName);
+        }
+        if (expr.right) {
+            validateLocalUsageInExpr(*expr.right, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::AssignIndex:
+        if (expr.object) {
+            validateLocalUsageInExpr(*expr.object, localNames, declaredNames, scopeName);
+        }
+        if (expr.index) {
+            validateLocalUsageInExpr(*expr.index, localNames, declaredNames, scopeName);
+        }
+        if (expr.right) {
+            validateLocalUsageInExpr(*expr.right, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::Binary:
+        if (expr.left) {
+            validateLocalUsageInExpr(*expr.left, localNames, declaredNames, scopeName);
+        }
+        if (expr.right) {
+            validateLocalUsageInExpr(*expr.right, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::Call:
+        if (expr.callee) {
+            validateLocalUsageInExpr(*expr.callee, localNames, declaredNames, scopeName);
+        }
+        for (const auto& arg : expr.args) {
+            validateLocalUsageInExpr(arg, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::MethodCall:
+        if (expr.object) {
+            validateLocalUsageInExpr(*expr.object, localNames, declaredNames, scopeName);
+        }
+        for (const auto& arg : expr.args) {
+            validateLocalUsageInExpr(arg, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::PropertyAccess:
+        if (expr.object) {
+            validateLocalUsageInExpr(*expr.object, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::IndexAccess:
+        if (expr.object) {
+            validateLocalUsageInExpr(*expr.object, localNames, declaredNames, scopeName);
+        }
+        if (expr.index) {
+            validateLocalUsageInExpr(*expr.index, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::ListLiteral:
+        for (const auto& element : expr.listElements) {
+            validateLocalUsageInExpr(element, localNames, declaredNames, scopeName);
+        }
+        return;
+    case ExprType::DictLiteral:
+        for (const auto& entry : expr.dictEntries) {
+            if (entry.key) {
+                validateLocalUsageInExpr(*entry.key, localNames, declaredNames, scopeName);
+            }
+            if (entry.value) {
+                validateLocalUsageInExpr(*entry.value, localNames, declaredNames, scopeName);
+            }
+        }
+        return;
+    case ExprType::Number:
+    case ExprType::StringLiteral:
+        return;
+    }
+}
+
+void collectLocalDeclarations(const std::vector<Stmt>& statements,
+                              std::unordered_set<std::string>& localNames,
+                              const std::string& scopeName) {
+    for (const auto& stmt : statements) {
+        switch (stmt.type) {
+        case StmtType::LetExpr:
+        case StmtType::LetSpawn:
+        case StmtType::LetAwait:
+            if (localNames.contains(stmt.name)) {
+                throw std::runtime_error(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
+                                                             scopeName,
+                                                             stmt.line,
+                                                             stmt.column));
+            }
+            localNames.insert(stmt.name);
+            break;
+        default:
+            break;
+        }
+
+        if (!stmt.body.empty()) {
+            collectLocalDeclarations(stmt.body, localNames, scopeName);
+        }
+        if (!stmt.elseBody.empty()) {
+            collectLocalDeclarations(stmt.elseBody, localNames, scopeName);
+        }
+        for (const auto& branchBody : stmt.branchBodies) {
+            if (!branchBody.empty()) {
+                collectLocalDeclarations(branchBody, localNames, scopeName);
+            }
+        }
+    }
+}
+
+void validateScopeLocalRules(const std::vector<Stmt>& statements,
+                             const std::vector<std::string>& predeclaredNames,
+                             const std::string& scopeName) {
+    std::unordered_set<std::string> localNames;
+    std::unordered_set<std::string> declaredNames;
+
+    for (const auto& name : predeclaredNames) {
+        if (localNames.contains(name)) {
+            throw std::runtime_error(formatCompilerError("Duplicate parameter in scope: " + name,
+                                                         scopeName,
+                                                         0,
+                                                         0));
+        }
+        localNames.insert(name);
+        declaredNames.insert(name);
+    }
+
+    collectLocalDeclarations(statements, localNames, scopeName);
+    validateLocalUsageInStatements(statements, localNames, declaredNames, scopeName);
+}
+
 Value evalClassFieldInit(const Expr& expr,
                         Module& module,
                         const std::unordered_map<std::string, std::size_t>& funcIndex,
@@ -608,6 +834,28 @@ void compileExpr(const Expr& expr,
         }
 
         emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+        return;
+    }
+    case ExprType::AssignVariable: {
+        if (!expr.right) {
+            throw std::runtime_error(formatCompilerError("Variable assignment expression is incomplete",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
+        }
+        compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                          module,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          expr.name);
+        if (resolved.found) {
+            emit(code, OpCode::StoreLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+        } else {
+            emit(code, OpCode::StoreName, addString(module, expr.name), 0);
+            emit(code, OpCode::LoadName, addString(module, expr.name), 0);
+        }
         return;
     }
     case ExprType::AssignProperty:
@@ -784,6 +1032,12 @@ void compileStatements(const std::vector<Stmt>& statements,
             if (isModuleInit) {
                 emit(out.code, OpCode::StoreName, addString(module, stmt.name), 0);
             } else {
+                if (locals.contains(stmt.name)) {
+                    throw std::runtime_error(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
+                                                                 currentFunctionName,
+                                                                 stmt.line,
+                                                                 stmt.column));
+                }
                 const auto slot = ensureLocal(locals, out, stmt.name);
                 emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
             }
@@ -1139,6 +1393,7 @@ Module Compiler::compile(const Program& program) {
 
     for (const auto& fn : program.functions) {
         FunctionBytecode& out = module.functions[funcIndex.at(fn.name)];
+        validateScopeLocalRules(fn.body, out.params, fn.name);
         std::unordered_map<std::string, std::size_t> locals;
         for (std::size_t i = 0; i < out.params.size(); ++i) {
             locals[out.params[i]] = i;
@@ -1156,6 +1411,7 @@ Module Compiler::compile(const Program& program) {
         for (const auto& method : cls.methods) {
             const std::string mangled = mangleMethodName(cls.name, method.name);
             FunctionBytecode& out = module.functions[funcIndex.at(mangled)];
+            validateScopeLocalRules(method.body, out.params, cls.name + "::" + method.name);
             std::unordered_map<std::string, std::size_t> locals;
             for (std::size_t i = 0; i < out.params.size(); ++i) {
                 locals[out.params[i]] = i;
@@ -1180,6 +1436,7 @@ Module Compiler::compile(const Program& program) {
 
     {
         FunctionBytecode& out = module.functions[funcIndex.at(moduleInitName)];
+        validateScopeLocalRules(program.topLevelStatements, {}, moduleInitName);
         std::unordered_map<std::string, std::size_t> locals;
         compileStatements(program.topLevelStatements,
                           module,

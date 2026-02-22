@@ -9,7 +9,7 @@ fn loop_demo() {
     let total = 0;
 
     for (i in range(5)) {
-        let total = total + i;
+        total = total + i;
     }
     print(total);
 
@@ -24,16 +24,16 @@ fn loop_demo() {
 
     let dict = {1: 100, 2: 200};
 
-    let i = 0;
-    while (i < 10) {
-        let i = i + 1;
-        if (i == 3) {
+    let whileIndex = 0;
+    while (whileIndex < 10) {
+        whileIndex = whileIndex + 1;
+        if (whileIndex == 3) {
             continue;
         }
-        if (i > 6) {
+        if (whileIndex > 6) {
             break;
         }
-        print(i);
+        print(whileIndex);
     }
 
     return total;

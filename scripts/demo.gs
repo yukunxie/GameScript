@@ -71,35 +71,42 @@ fn test_tuple() {
 fn test_loops_and_control_flow() {
     let rangeSum = 0;
     for (i in range(0, 10)) {
-        let rangeSum = rangeSum + i;
+        rangeSum = rangeSum + i;
     }
     assert(rangeSum == 45, "range sum expected 45, actual {}", rangeSum);
 
     let list = [1, 2, 3, 4];
     let listSum = 0;
     for (v in list) {
-        let listSum = listSum + v;
+        listSum = listSum + v;
     }
     assert(listSum == 10, "list sum expected 10, actual {}", listSum);
+
+    let tuple = Tuple(5, 6, 7, 8);
+    let tupleSum = 0;
+    for (element in tuple) {
+        tupleSum = tupleSum + element;
+    }
+    assert(tupleSum == 26, "tuple sum expected 26, actual {}", tupleSum);
 
     let dict = {1: 7, 2: 8, 3: 9};
     let dictSum = 0;
     for (k, v in dict) {
-        let dictSum = dictSum + v;
+        dictSum = dictSum + v;
     }
     assert(dictSum == 24, "dict values sum expected 24, actual {}", dictSum);
 
-    let i = 0;
+    let whileIndex = 0;
     let whileSum = 0;
-    while (i < 10) {
-        let i = i + 1;
-        if (i == 3) {
+    while (whileIndex < 10) {
+        whileIndex = whileIndex + 1;
+        if (whileIndex == 3) {
             continue;
         }
-        if (i > 7) {
+        if (whileIndex > 7) {
             break;
         }
-        let whileSum = whileSum + i;
+        whileSum = whileSum + whileIndex;
     }
     assert(whileSum == 25, "while sum expected 25, actual {}", whileSum);
     return 1;
@@ -147,7 +154,7 @@ fn test_classes_and_host_objects() {
 fn benchmark_hot_loop() {
     let total = 0;
     for (i in range(0, 10000)) {
-        let total = total + i;
+        total = total + i;
     }
     assert(total == 49995000, "hot loop checksum mismatch: {}", total);
     return total;
@@ -156,10 +163,43 @@ fn benchmark_hot_loop() {
 fn benchmark_module_calls() {
     let total = 0;
     for (i in range(0, 2000)) {
-        let total = total + mm.add(i, 1);
+        total = total + mm.add(i, 1);
     }
     assert(total == 2001000, "module-call benchmark checksum mismatch: {}", total);
     return total;
+}
+
+fn benchmark_iter_traversal() {
+    let list = [];
+    for (i in range(0, 1000)) {
+        list.push(i);
+    }
+
+    let tuple = Tuple(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+
+    let dict = {};
+    for (i in range(0, 1000)) {
+        dict[i] = i + 1;
+    }
+
+    let sumList = 0;
+    for (element in list) {
+        sumList = sumList + element;
+    }
+
+    let sumTuple = 0;
+    for (element in tuple) {
+        sumTuple = sumTuple + element;
+    }
+
+    let sumDict = 0;
+    for (k, v in dict) {
+        sumDict = sumDict + k + v;
+    }
+
+    let checksum = sumList + sumTuple + sumDict;
+    assert(checksum == 1499555, "iter-traversal benchmark checksum mismatch: {}", checksum);
+    return checksum;
 }
 
 fn benchmark_printf() {
@@ -177,16 +217,17 @@ fn run_bench(verbose) {
     }
 
     let passed = 0;
-    let passed = passed + test_arithmetic_and_string();
-    let passed = passed + test_list_and_dict();
-    let passed = passed + test_tuple();
-    let passed = passed + test_loops_and_control_flow();
-    let passed = passed + test_modules_and_imports();
-    let passed = passed + test_classes_and_host_objects();
+    passed = passed + test_arithmetic_and_string();
+    passed = passed + test_list_and_dict();
+    passed = passed + test_tuple();
+    passed = passed + test_loops_and_control_flow();
+    passed = passed + test_modules_and_imports();
+    passed = passed + test_classes_and_host_objects();
 
     let checksum1 = benchmark_hot_loop();
     let checksum2 = benchmark_module_calls();
-    let checksum3 = benchmark_printf();
+    let checksum3 = benchmark_iter_traversal();
+    let checksum4 = benchmark_printf();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
@@ -195,12 +236,13 @@ fn run_bench(verbose) {
         print("[bench] checksum1", checksum1);
         print("[bench] checksum2", checksum2);
         print("[bench] checksum3", checksum3);
+        print("[bench] checksum4", checksum4);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
     assert(passed == 6, "passed groups expected 6, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + reclaimed;
+    return checksum1 + checksum2 + checksum3 + checksum4 + reclaimed;
 }
 
 fn ue_entry() {

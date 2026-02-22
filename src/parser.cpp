@@ -438,6 +438,16 @@ Expr Parser::parseAssignment() {
     }
 
     Expr rhs = parseAssignment();
+    if (lhs.type == ExprType::Variable) {
+        Expr expr;
+        expr.type = ExprType::AssignVariable;
+        expr.line = lhs.line;
+        expr.column = lhs.column;
+        expr.name = lhs.name;
+        expr.right = std::make_unique<Expr>(std::move(rhs));
+        return expr;
+    }
+
     if (lhs.type == ExprType::PropertyAccess) {
         Expr expr;
         expr.type = ExprType::AssignProperty;
@@ -460,7 +470,7 @@ Expr Parser::parseAssignment() {
         return expr;
     }
 
-    throw std::runtime_error(formatParseError("Only object property or index assignment is supported", peek()));
+    throw std::runtime_error(formatParseError("Only variable/property/index assignment is supported", peek()));
 }
 
 Expr Parser::parseEquality() {
