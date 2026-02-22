@@ -392,9 +392,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
                                                          lineNo,
                                                          1));
         }
-        const std::string tempName = makeInternalAlias("import_" + stmt.moduleSpec, importTempIndex++);
-        bodySource << "let " << tempName << " = loadModule(\"" << stmt.moduleSpec << "\", \"" << importedName << "\"); "
-                   << "let " << localName << " = " << tempName << "." << importedName << ";\n";
+                                bodySource << "let " << localName << " = loadModule(\"" << stmt.moduleSpec << "\", \"" << importedName << "\");\n";
     }
 
     visiting.erase(canonical);

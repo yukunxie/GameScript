@@ -4,8 +4,11 @@ import module_math as mm;
 import module_globals as mg;
 import system as system;
 from module_math import add as plus;
+from module_math import add, hello as gg;
 
 let TOP_LEVEL_SENTINEL = 314;
+
+print ("gg.hello", gg.hello(), TOP_LEVEL_SENTINEL);
 
 fn test_arithmetic_and_string() {
     let x = 40 + 2;
@@ -137,6 +140,14 @@ fn benchmark_module_calls() {
     return total;
 }
 
+fn benchmark_printf() {
+    let i = 100;
+    let value = i * 7 + 3;
+    printf("[printf-bench] i=%03d hex=%H str={} fp=%.2f\\n", i, value, value, value);
+    let checksum = value;
+    return checksum;
+}
+
 fn main() {
     print("[bench] suite start");
 
@@ -149,12 +160,14 @@ fn main() {
 
     let checksum1 = benchmark_hot_loop();
     let checksum2 = benchmark_module_calls();
+    let checksum3 = benchmark_printf();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
     print("[bench] passed groups", passed);
     print("[bench] checksum1", checksum1);
     print("[bench] checksum2", checksum2);
+    print("[bench] checksum3", checksum3);
     print("[bench] gc", reclaimed);
     print("[bench] suite done");
 

@@ -3,8 +3,10 @@
 #include "gs/type_system.hpp"
 
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -99,6 +101,342 @@ std::string formatAssertMessage(HostContext& context,
     return out.str();
 }
 
+const Value& requireFormatArg(const std::vector<Value>& args,
+                              std::size_t& argIndex,
+                              const char* who) {
+    if (argIndex >= args.size()) {
+        throw std::runtime_error(std::string(who) + " missing format argument");
+    }
+    return args[argIndex++];
+}
+
+std::int64_t toSignedInt(HostContext& context, const Value& value, const char* who) {
+    if (value.isInt()) {
+        return value.asInt();
+    }
+    try {
+        return std::stoll(context.__str__(value));
+    } catch (...) {
+        throw std::runtime_error(std::string(who) + " expected integer argument");
+    }
+}
+
+std::uint64_t toUnsignedInt(HostContext& context, const Value& value, const char* who) {
+    const auto signedValue = toSignedInt(context, value, who);
+    return static_cast<std::uint64_t>(signedValue);
+}
+
+double toFloatingPoint(HostContext& context, const Value& value, const char* who) {
+    if (value.isInt()) {
+        return static_cast<double>(value.asInt());
+    }
+    try {
+        return std::stod(context.__str__(value));
+    } catch (...) {
+        throw std::runtime_error(std::string(who) + " expected numeric argument");
+    }
+}
+
+std::string formatPrintf(const std::string& format,
+                         HostContext& context,
+                         const std::vector<Value>& args,
+                         std::size_t argStart) {
+    std::ostringstream out;
+    std::size_t argIndex = argStart;
+    std::size_t i = 0;
+
+    while (i < format.size()) {
+        const char c = format[i];
+
+        if (c == '\\' && i + 1 < format.size()) {
+            const char esc = format[i + 1];
+            switch (esc) {
+            case 'n': out << '\n'; break;
+            case 't': out << '\t'; break;
+            case 'r': out << '\r'; break;
+            case '{': out << '{'; break;
+            case '}': out << '}'; break;
+            case '"': out << '"'; break;
+            case '%': out << '%'; break;
+            case '\\': out << '\\'; break;
+            default: out << esc; break;
+            }
+            i += 2;
+            continue;
+        }
+
+        if (c == '{' && i + 1 < format.size() && format[i + 1] == '}') {
+            out << context.__str__(requireFormatArg(args, argIndex, "printf"));
+            i += 2;
+            continue;
+        }
+
+        if (c != '%') {
+            out << c;
+            ++i;
+            continue;
+        }
+
+        if (i + 1 < format.size() && format[i + 1] == '%') {
+            out << '%';
+            i += 2;
+            continue;
+        }
+
+        ++i;
+        bool zeroPad = false;
+        int width = 0;
+        int precision = -1;
+
+        if (i < format.size() && format[i] == '0') {
+            zeroPad = true;
+        }
+        while (i < format.size() && format[i] >= '0' && format[i] <= '9') {
+            width = width * 10 + static_cast<int>(format[i] - '0');
+            ++i;
+        }
+
+        if (i < format.size() && format[i] == '.') {
+            ++i;
+            precision = 0;
+            bool hasPrecisionDigit = false;
+            while (i < format.size() && format[i] >= '0' && format[i] <= '9') {
+                precision = precision * 10 + static_cast<int>(format[i] - '0');
+                hasPrecisionDigit = true;
+                ++i;
+            }
+            if (!hasPrecisionDigit) {
+                throw std::runtime_error("printf invalid precision after '.'");
+            }
+        }
+
+        if (i >= format.size()) {
+            throw std::runtime_error("printf trailing '%' in format string");
+        }
+
+        const char spec = format[i++];
+        switch (spec) {
+        case 'd': {
+            const auto& v = requireFormatArg(args, argIndex, "printf");
+            std::ostringstream tmp;
+            if (width > 0) {
+                tmp << std::setw(width) << std::setfill(zeroPad ? '0' : ' ');
+            }
+            tmp << toSignedInt(context, v, "printf");
+            out << tmp.str();
+            break;
+        }
+        case 'u': {
+            const auto& v = requireFormatArg(args, argIndex, "printf");
+            std::ostringstream tmp;
+            if (width > 0) {
+                tmp << std::setw(width) << std::setfill(zeroPad ? '0' : ' ');
+            }
+            tmp << toUnsignedInt(context, v, "printf");
+            out << tmp.str();
+            break;
+        }
+        case 'h':
+        case 'H': {
+            const auto& v = requireFormatArg(args, argIndex, "printf");
+            std::ostringstream tmp;
+            if (width > 0) {
+                tmp << std::setw(width) << std::setfill(zeroPad ? '0' : ' ');
+            }
+            if (spec == 'H') {
+                tmp << std::uppercase;
+            }
+            tmp << std::hex << toUnsignedInt(context, v, "printf");
+            out << tmp.str();
+            break;
+        }
+        case 's': {
+            const auto& v = requireFormatArg(args, argIndex, "printf");
+            out << context.__str__(v);
+            break;
+        }
+        case 'f': {
+            const auto& v = requireFormatArg(args, argIndex, "printf");
+            std::ostringstream tmp;
+            if (width > 0) {
+                tmp << std::setw(width) << std::setfill(zeroPad ? '0' : ' ');
+            }
+            tmp << std::fixed << std::setprecision(precision >= 0 ? precision : 6);
+            tmp << toFloatingPoint(context, v, "printf");
+            out << tmp.str();
+            break;
+        }
+        default:
+            throw std::runtime_error(std::string("printf unsupported format specifier: %") + spec);
+        }
+    }
+
+    return out.str();
+}
+
+std::vector<std::string> collectRequestedExports(HostContext& context,
+                                                 const std::vector<Value>& args,
+                                                 std::size_t startIndex) {
+    std::vector<std::string> requested;
+    if (args.size() <= startIndex) {
+        return requested;
+    }
+
+    requested.reserve(args.size() - startIndex);
+    for (std::size_t i = startIndex; i < args.size(); ++i) {
+        const std::string name = context.__str__(args[i]);
+        if (name.empty()) {
+            throw std::runtime_error("loadModule() export names must be non-empty strings");
+        }
+        requested.push_back(name);
+    }
+    return requested;
+}
+
+bool scriptModuleContainsExport(const Module& module, const std::string& exportName) {
+    for (const auto& global : module.globals) {
+        if (global.name == exportName) {
+            return true;
+        }
+    }
+    for (const auto& fn : module.functions) {
+        if (fn.name == exportName) {
+            return true;
+        }
+    }
+    for (const auto& cls : module.classes) {
+        if (cls.name == exportName) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Value resolveModuleExportValue(HostContext& context,
+                               const Value& moduleRef,
+                               const std::string& moduleName,
+                               const std::string& exportName,
+                               FunctionType& functionType,
+                               ClassType& classType) {
+    if (!moduleRef.isRef()) {
+        throw std::runtime_error("loadModule() did not return module object for export resolution");
+    }
+
+    Object& object = context.getObject(moduleRef);
+    auto* moduleObject = dynamic_cast<ModuleObject*>(&object);
+    if (!moduleObject) {
+        throw std::runtime_error("loadModule() did not return Module object");
+    }
+
+    auto exportIt = moduleObject->exports().find(exportName);
+    if (exportIt != moduleObject->exports().end()) {
+        return exportIt->second;
+    }
+
+    const auto& modulePin = moduleObject->modulePin();
+    if (modulePin) {
+        for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
+            if (modulePin->functions[i].name == exportName) {
+                Value out = context.createObject(std::make_unique<FunctionObject>(functionType, i, modulePin));
+                moduleObject->exports()[exportName] = out;
+                return out;
+            }
+        }
+
+        for (std::size_t i = 0; i < modulePin->classes.size(); ++i) {
+            if (modulePin->classes[i].name == exportName) {
+                Value out = context.createObject(std::make_unique<ClassObject>(classType,
+                                                                                modulePin->classes[i].name,
+                                                                                i,
+                                                                                modulePin));
+                moduleObject->exports()[exportName] = out;
+                return out;
+            }
+        }
+
+        auto globalIt = moduleObject->exports().find(exportName);
+        if (globalIt != moduleObject->exports().end()) {
+            return globalIt->second;
+        }
+    }
+
+    throw std::runtime_error("Module export not found: " + moduleName + "." + exportName);
+}
+
+Value buildProjectedModuleObject(HostContext& context,
+                                 ModuleType& moduleType,
+                                 const std::string& moduleName,
+                                 const Value& baseModuleRef,
+                                 const std::vector<std::string>& requestedExports,
+                                 FunctionType& functionType,
+                                 ClassType& classType) {
+    Value projectedRef = context.createObject(std::make_unique<ModuleObject>(moduleType, moduleName));
+    Object& projectedObject = context.getObject(projectedRef);
+    auto* projectedModule = dynamic_cast<ModuleObject*>(&projectedObject);
+    if (!projectedModule) {
+        throw std::runtime_error("Failed to create projected Module object");
+    }
+
+    for (const auto& exportName : requestedExports) {
+        projectedModule->exports()[exportName] = resolveModuleExportValue(context,
+                                                                          baseModuleRef,
+                                                                          moduleName,
+                                                                          exportName,
+                                                                          functionType,
+                                                                          classType);
+    }
+
+    return projectedRef;
+}
+
+void ensureRequestedExportsAvailable(HostContext& context,
+                                     const Value& moduleRef,
+                                     const std::string& moduleName,
+                                     const std::vector<std::string>& requestedExports) {
+    if (requestedExports.empty()) {
+        return;
+    }
+
+    if (!moduleRef.isRef()) {
+        throw std::runtime_error("loadModule() did not return module object for export validation");
+    }
+
+    Object& object = context.getObject(moduleRef);
+    auto* moduleObject = dynamic_cast<ModuleObject*>(&object);
+    if (!moduleObject) {
+        throw std::runtime_error("loadModule() did not return Module object");
+    }
+
+    const auto& exports = moduleObject->exports();
+    const auto& modulePin = moduleObject->modulePin();
+    for (const auto& exportName : requestedExports) {
+        bool found = exports.contains(exportName);
+        if (!found && modulePin) {
+            found = scriptModuleContainsExport(*modulePin, exportName);
+        }
+
+        if (!found) {
+            throw std::runtime_error("Module export not found: " + moduleName + "." + exportName);
+        }
+    }
+}
+
+void resolveRequestedExports(HostContext& context,
+                             const Value& moduleRef,
+                             const std::string& moduleName,
+                             const std::vector<std::string>& requestedExports,
+                             FunctionType& functionType,
+                             ClassType& classType) {
+    for (const auto& exportName : requestedExports) {
+        (void)resolveModuleExportValue(context,
+                                       moduleRef,
+                                       moduleName,
+                                       exportName,
+                                       functionType,
+                                       classType);
+    }
+}
+
 } // namespace
 
 void bindGlobalModule(HostRegistry& host) {
@@ -107,19 +445,41 @@ void bindGlobalModule(HostRegistry& host) {
             throw std::runtime_error("loadModule() accepts at least one argument");
         }
         const std::string moduleName = context.__str__(args[0]);
-
-        for (std::size_t i = 1; i < args.size(); ++i) {
-            (void)context.__str__(args[i]);
-        }
+        const std::vector<std::string> requestedExports = collectRequestedExports(context, args, 1);
 
         static ModuleType moduleType;
         static NativeFunctionType nativeFunctionType;
+        static FunctionType functionType;
+        static ClassType classType;
 
         if (host.hasModule(moduleName)) {
             const std::string builtinKey = "builtin:" + moduleName;
             Value cached = Value::Nil();
             if (context.tryGetCachedModuleObject(builtinKey, cached)) {
                 context.ensureModuleInitialized(cached);
+                resolveRequestedExports(context,
+                                       cached,
+                                       moduleName,
+                                       requestedExports,
+                                       functionType,
+                                       classType);
+                if (requestedExports.size() == 1) {
+                    return resolveModuleExportValue(context,
+                                                    cached,
+                                                    moduleName,
+                                                    requestedExports[0],
+                                                    functionType,
+                                                    classType);
+                }
+                if (requestedExports.size() > 1) {
+                    return buildProjectedModuleObject(context,
+                                                      moduleType,
+                                                      moduleName,
+                                                      cached,
+                                                      requestedExports,
+                                                      functionType,
+                                                      classType);
+                }
                 return cached;
             }
 
@@ -129,6 +489,29 @@ void bindGlobalModule(HostRegistry& host) {
                                                   moduleType);
             context.cacheModuleObject(builtinKey, moduleRef);
             context.ensureModuleInitialized(moduleRef);
+            resolveRequestedExports(context,
+                                   moduleRef,
+                                   moduleName,
+                                   requestedExports,
+                                   functionType,
+                                   classType);
+            if (requestedExports.size() == 1) {
+                return resolveModuleExportValue(context,
+                                                moduleRef,
+                                                moduleName,
+                                                requestedExports[0],
+                                                functionType,
+                                                classType);
+            }
+            if (requestedExports.size() > 1) {
+                return buildProjectedModuleObject(context,
+                                                  moduleType,
+                                                  moduleName,
+                                                  moduleRef,
+                                                  requestedExports,
+                                                  functionType,
+                                                  classType);
+            }
             return moduleRef;
         }
 
@@ -148,22 +531,73 @@ void bindGlobalModule(HostRegistry& host) {
         Value cached = Value::Nil();
         if (context.tryGetCachedModuleObject(moduleKey, cached)) {
             context.ensureModuleInitialized(cached);
+            resolveRequestedExports(context,
+                                   cached,
+                                   moduleName,
+                                   requestedExports,
+                                   functionType,
+                                   classType);
+            if (requestedExports.size() == 1) {
+                return resolveModuleExportValue(context,
+                                                cached,
+                                                moduleName,
+                                                requestedExports[0],
+                                                functionType,
+                                                classType);
+            }
+            if (requestedExports.size() > 1) {
+                return buildProjectedModuleObject(context,
+                                                  moduleType,
+                                                  moduleName,
+                                                  cached,
+                                                  requestedExports,
+                                                  functionType,
+                                                  classType);
+            }
             return cached;
         }
 
         Value moduleRef = context.createObject(std::make_unique<ModuleObject>(moduleType, moduleName, it->second));
         context.cacheModuleObject(moduleKey, moduleRef);
         context.ensureModuleInitialized(moduleRef);
+        resolveRequestedExports(context,
+                               moduleRef,
+                               moduleName,
+                               requestedExports,
+                               functionType,
+                               classType);
+        if (requestedExports.size() == 1) {
+            return resolveModuleExportValue(context,
+                                            moduleRef,
+                                            moduleName,
+                                            requestedExports[0],
+                                            functionType,
+                                            classType);
+        }
+        if (requestedExports.size() > 1) {
+            return buildProjectedModuleObject(context,
+                                              moduleType,
+                                              moduleName,
+                                              moduleRef,
+                                              requestedExports,
+                                              functionType,
+                                              classType);
+        }
         return moduleRef;
     });
 
     host.bind("print", [](HostContext& context, const std::vector<Value>& args) -> Value {
-        printValues(context, args, true, true, ", ");
+        printValues(context, args, true, true, " ");
         return Value::Int(0);
     });
 
     host.bind("printf", [](HostContext& context, const std::vector<Value>& args) -> Value {
-        printValues(context, args, false, false, "");
+        if (args.empty()) {
+            return Value::Int(0);
+        }
+
+        const std::string fmt = context.__str__(args[0]);
+        std::cout << formatPrintf(fmt, context, args, 1);
         return Value::Int(0);
     });
 
