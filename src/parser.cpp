@@ -563,7 +563,76 @@ Expr Parser::parseUnary() {
     return parsePrimary();
 }
 
+bool Parser::isLambdaStart() const {
+    if (!check(TokenType::LParen)) {
+        return false;
+    }
+
+    std::size_t index = current_ + 1;
+    if (index >= tokens_.size()) {
+        return false;
+    }
+
+    if (tokens_[index].type != TokenType::RParen) {
+        while (true) {
+            if (index >= tokens_.size() || tokens_[index].type != TokenType::Identifier) {
+                return false;
+            }
+            ++index;
+            if (index >= tokens_.size()) {
+                return false;
+            }
+            if (tokens_[index].type == TokenType::Comma) {
+                ++index;
+                continue;
+            }
+            if (tokens_[index].type == TokenType::RParen) {
+                break;
+            }
+            return false;
+        }
+    }
+
+    if (index >= tokens_.size() || tokens_[index].type != TokenType::RParen) {
+        return false;
+    }
+    ++index;
+    if (index >= tokens_.size() || tokens_[index].type != TokenType::FatArrow) {
+        return false;
+    }
+    ++index;
+    return index < tokens_.size() && tokens_[index].type == TokenType::LBrace;
+}
+
 Expr Parser::parsePrimary() {
+    if (isLambdaStart()) {
+        const Token beginToken = consume(TokenType::LParen, "Expected '(' at lambda start");
+
+        std::vector<std::string> params;
+        if (!check(TokenType::RParen)) {
+            do {
+                params.push_back(consume(TokenType::Identifier, "Expected lambda parameter name").text);
+            } while (match(TokenType::Comma));
+        }
+        consume(TokenType::RParen, "Expected ')' after lambda parameters");
+        consume(TokenType::FatArrow, "Expected '=>' after lambda parameters");
+        consume(TokenType::LBrace, "Expected '{' after lambda arrow");
+
+        auto lambdaDecl = std::make_unique<FunctionDecl>();
+        lambdaDecl->line = beginToken.line;
+        lambdaDecl->column = beginToken.column;
+        lambdaDecl->name.clear();
+        lambdaDecl->params = std::move(params);
+        lambdaDecl->body = parseBlock();
+
+        Expr expr;
+        expr.type = ExprType::Lambda;
+        expr.line = beginToken.line;
+        expr.column = beginToken.column;
+        expr.lambdaDecl = std::move(lambdaDecl);
+        return parsePostfix(std::move(expr));
+    }
+
     if (match(TokenType::Number)) {
         Expr expr;
         expr.type = ExprType::Number;

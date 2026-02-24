@@ -57,6 +57,7 @@ struct Frame {
     bool replaceReturnWithInstance{false};
     Value constructorInstance{Value::Nil()};
     std::vector<Value> locals;
+    std::vector<Value> captures;
     std::vector<Value> stack;
     std::size_t stackTop{0};
     std::array<Value, 8> registers{Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil()};
@@ -97,7 +98,8 @@ private:
                               std::size_t functionIndex,
                               const std::vector<Value>& args,
                               bool replaceReturnWithInstance = false,
-                              Value constructorInstance = Value::Nil());
+                              Value constructorInstance = Value::Nil(),
+                              std::vector<Value> captures = {});
     void runDeleteHooks(ExecutionContext& context);
 
     Object& getObject(ExecutionContext& context, const Value& ref);
@@ -108,10 +110,12 @@ private:
     ListType listType_;
     DictType dictType_;
     FunctionType functionType_;
+    LambdaType lambdaType_;
     NativeFunctionType nativeFunctionType_;
     ClassType classType_;
     ModuleType moduleType_;
     ScriptInstanceType instanceType_;
+    UpvalueCellType upvalueCellType_;
 };
 
 } // namespace gs

@@ -43,6 +43,7 @@ enum class TokenType {
     Semicolon,
     Bang,
     BangEqual,
+    FatArrow,
     Equal,
     EqualEqual,
     Less,

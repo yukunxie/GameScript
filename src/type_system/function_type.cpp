@@ -5,19 +5,7 @@ namespace gs {
 FunctionObject::FunctionObject(const Type& typeRef,
                                std::size_t functionIndex,
                                std::shared_ptr<const Module> modulePin)
-    : type_(&typeRef), functionIndex_(functionIndex), modulePin_(std::move(modulePin)) {}
-
-const Type& FunctionObject::getType() const {
-    return *type_;
-}
-
-std::size_t FunctionObject::functionIndex() const {
-    return functionIndex_;
-}
-
-const std::shared_ptr<const Module>& FunctionObject::modulePin() const {
-    return modulePin_;
-}
+        : ScriptCallableObjectBase(typeRef, functionIndex, std::move(modulePin)) {}
 
 const char* FunctionType::name() const {
     return "Function";

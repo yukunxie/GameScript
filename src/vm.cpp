@@ -168,6 +168,18 @@ void traceObjectChildren(ExecutionContext& context, std::uint64_t objectId, bool
         }
         return;
     }
+
+    if (auto* lambdaObject = dynamic_cast<LambdaObject*>(object)) {
+        for (const auto& value : lambdaObject->captures()) {
+            markChild(value);
+        }
+        return;
+    }
+
+    if (auto* cell = dynamic_cast<UpvalueCellObject*>(object)) {
+        markChild(cell->value());
+        return;
+    }
 }
 
 void markRoots(ExecutionContext& context, bool youngOnly) {
@@ -179,6 +191,9 @@ void markRoots(ExecutionContext& context, bool youngOnly) {
         }
         for (const auto& value : frame.locals) {
             markValue(context, value, youngOnly);
+        }
+        for (const auto& capture : frame.captures) {
+            markValue(context, capture, youngOnly);
         }
         for (std::size_t i = 0; i < frame.stackTop; ++i) {
             markValue(context, frame.stack[i], youngOnly);
@@ -677,6 +692,18 @@ Value makeFunctionObject(ExecutionContext& context,
     return emplaceObject(context, std::make_unique<FunctionObject>(functionType, functionIndex, std::move(modulePin)));
 }
 
+Value makeLambdaObject(ExecutionContext& context,
+                       LambdaType& lambdaType,
+                       std::size_t functionIndex,
+                       std::shared_ptr<const Module> modulePin,
+                       std::vector<Value> captures) {
+    return emplaceObject(context,
+                         std::make_unique<LambdaObject>(lambdaType,
+                                                        functionIndex,
+                                                        std::move(modulePin),
+                                                        std::move(captures)));
+}
+
 Value makeClassObjectValue(ExecutionContext& context,
                            ClassType& classType,
                            const std::shared_ptr<const Module>& modulePin,
@@ -1022,7 +1049,8 @@ void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
                                    std::size_t functionIndex,
                                    const std::vector<Value>& args,
                                    bool replaceReturnWithInstance,
-                                   Value constructorInstance) {
+                                   Value constructorInstance,
+                                   std::vector<Value> captures) {
     if (!modulePin) {
         throw std::runtime_error("Call frame module is null");
     }
@@ -1039,6 +1067,7 @@ void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
     frame.replaceReturnWithInstance = replaceReturnWithInstance;
     frame.constructorInstance = constructorInstance;
     frame.locals.assign(fn.localCount, Value::Nil());
+    frame.captures = std::move(captures);
     frame.stack.assign(fn.stackSlotCount, Value::Nil());
     frame.stackTop = 0;
     frame.registerValue = Value::Nil();
@@ -1114,7 +1143,16 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                              moduleType_,
                                              hosts_,
                                              frameModule,
-                                             frame.locals.at(index),
+                                             [&]() -> Value {
+                                                 const Value& localValue = frame.locals.at(index);
+                                                 if (localValue.isRef()) {
+                                                     Object* localObject = localValue.asRef();
+                                                     if (localObject && dynamic_cast<UpvalueCellObject*>(localObject)) {
+                                                         return dynamic_cast<UpvalueCellObject*>(localObject)->value();
+                                                     }
+                                                 }
+                                                 return localValue;
+                                             }(),
                                              false);
             case SlotType::Constant:
                 return normalizeRuntimeValue(context,
@@ -1136,8 +1174,148 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                              frameModule,
                                              readRegister(index),
                                              false);
+            case SlotType::UpValue: {
+                if (index < 0 || static_cast<std::size_t>(index) >= frame.captures.size()) {
+                    throw std::runtime_error("Capture index out of range");
+                }
+                const Value captureRef = frame.captures[static_cast<std::size_t>(index)];
+                Object& object = getObject(context, captureRef);
+                auto* cell = dynamic_cast<UpvalueCellObject*>(&object);
+                if (!cell) {
+                    throw std::runtime_error("Capture is not an upvalue cell");
+                }
+                return normalizeRuntimeValue(context,
+                                             functionType_,
+                                             classType_,
+                                             nativeFunctionType_,
+                                             moduleType_,
+                                             hosts_,
+                                             frameModule,
+                                             cell->value(),
+                                             false);
+            }
             }
             return Value::Nil();
+        };
+
+        const auto tryInvokeScriptCallable = [&](Object& callableObject,
+                                                 const std::shared_ptr<const Module>& fallbackModule,
+                                                 const std::vector<Value>& invokeArgs,
+                                                 const std::string& missingBindingMessage) -> bool {
+            if (auto* lambdaObject = dynamic_cast<LambdaObject*>(&callableObject)) {
+                const auto callModule = lambdaObject->modulePin() ? lambdaObject->modulePin() : fallbackModule;
+                if (!callModule) {
+                    throw std::runtime_error(missingBindingMessage);
+                }
+                pushCallFrame(context,
+                              callModule,
+                              lambdaObject->functionIndex(),
+                              invokeArgs,
+                              false,
+                              Value::Nil(),
+                              lambdaObject->captures());
+                return true;
+            }
+
+            if (auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject)) {
+                const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : fallbackModule;
+                if (!callModule) {
+                    throw std::runtime_error(missingBindingMessage);
+                }
+                pushCallFrame(context,
+                              callModule,
+                              fnObject->functionIndex(),
+                              invokeArgs);
+                return true;
+            }
+
+            return false;
+        };
+
+        const auto tryInvokeClassOrNativeCallable = [&](Object& callableObject,
+                                                        const std::vector<Value>& invokeArgs) -> bool {
+            if (auto* classObject = dynamic_cast<ClassObject*>(&callableObject)) {
+                const auto& targetModule = classObject->modulePin();
+                if (!targetModule) {
+                    throw std::runtime_error("Class object is not bound to module: " + classObject->className());
+                }
+
+                const std::size_t classIndex = classObject->classIndex();
+                const Value instanceRef = makeScriptInstance(context,
+                                                             functionType_,
+                                                             classType_,
+                                                             nativeFunctionType_,
+                                                             moduleType_,
+                                                             hosts_,
+                                                             instanceType_,
+                                                             *targetModule,
+                                                             targetModule,
+                                                             classIndex);
+
+                std::size_t ctorFunctionIndex = 0;
+                if (!tryFindClassMethodInModule(*targetModule, classIndex, "__new__", ctorFunctionIndex)) {
+                    throw std::runtime_error("Class is missing required constructor __new__: " + classObject->className());
+                }
+
+                std::vector<Value> ctorInvokeArgs;
+                ctorInvokeArgs.reserve(invokeArgs.size() + 1);
+                ctorInvokeArgs.push_back(instanceRef);
+                ctorInvokeArgs.insert(ctorInvokeArgs.end(), invokeArgs.begin(), invokeArgs.end());
+                pushCallFrame(context,
+                              targetModule,
+                              ctorFunctionIndex,
+                              ctorInvokeArgs,
+                              true,
+                              instanceRef);
+                return true;
+            }
+
+            if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
+                const std::size_t callerFrameIndex = context.frames.size() - 1;
+                VmHostContext hostContext(*this, context);
+                const Value result = nativeFunction->invoke(hostContext, invokeArgs);
+                if (callerFrameIndex < context.frames.size()) {
+                    pushRaw(context.frames[callerFrameIndex].stack,
+                            context.frames[callerFrameIndex].stackTop,
+                            result);
+                }
+                return true;
+            }
+
+            return false;
+        };
+
+        const auto tryInvokeModuleNamedCallable = [&](const std::shared_ptr<const Module>& targetModule,
+                                                      const std::string& callableName,
+                                                      const std::vector<Value>& invokeArgs) -> bool {
+            if (!targetModule) {
+                return false;
+            }
+
+            for (std::size_t i = 0; i < targetModule->functions.size(); ++i) {
+                if (targetModule->functions[i].name == callableName) {
+                    pushCallFrame(context,
+                                  targetModule,
+                                  i,
+                                  invokeArgs);
+                    return true;
+                }
+            }
+
+            for (std::size_t i = 0; i < targetModule->classes.size(); ++i) {
+                if (targetModule->classes[i].name != callableName) {
+                    continue;
+                }
+
+                const Value classRef = makeClassObjectValue(context,
+                                                            classType_,
+                                                            targetModule,
+                                                            i);
+                Object& classObject = getObject(context, classRef);
+                return tryInvokeClassOrNativeCallable(classObject, invokeArgs);
+            }
+
+            return false;
         };
 
         switch (ins.op) {
@@ -1179,30 +1357,25 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::LoadLocal:
-            pushRaw(frame.stack, frame.stackTop, normalizeRuntimeValue(context,
-                                                        functionType_,
-                                                        classType_,
-                                                        nativeFunctionType_,
-                                                        moduleType_,
-                                                        hosts_,
-                                                        frameModule,
-                                                        frame.locals.at(ins.a),
-                                                        false));
+            pushRaw(frame.stack, frame.stackTop, resolveSlotValue(SlotType::Local, ins.a));
             break;
         case OpCode::PushLocal:
-            pushRaw(frame.stack, frame.stackTop, normalizeRuntimeValue(context,
-                                                        functionType_,
-                                                        classType_,
-                                                        nativeFunctionType_,
-                                                        moduleType_,
-                                                        hosts_,
-                                                        frameModule,
-                                                        frame.locals.at(ins.a),
-                                                        false));
+            pushRaw(frame.stack, frame.stackTop, resolveSlotValue(SlotType::Local, ins.a));
             break;
         case OpCode::StoreLocal: {
             const Value v = popRaw(frame.stack, frame.stackTop);
-            frame.locals.at(ins.a) = v;
+            Value& localValue = frame.locals.at(ins.a);
+            if (localValue.isRef()) {
+                Object* localObject = localValue.asRef();
+                if (localObject) {
+                    if (auto* cell = dynamic_cast<UpvalueCellObject*>(localObject)) {
+                        rememberWriteBarrier(context, *cell, v);
+                        cell->value() = v;
+                        break;
+                    }
+                }
+            }
+            localValue = v;
             break;
         }
         case OpCode::StoreName: {
@@ -1702,62 +1875,14 @@ load_attr_done:
                     }
 
                     Object& callableObject = getObject(context, callable);
-                    if (auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject)) {
-                        const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : exportModulePin;
-                        if (!callModule) {
-                            throw std::runtime_error("Module export function is missing module binding: " + methodName);
-                        }
-                        pushCallFrame(context,
-                                      callModule,
-                                      fnObject->functionIndex(),
-                                      argScratch);
+                    if (tryInvokeScriptCallable(callableObject,
+                                                exportModulePin,
+                                                argScratch,
+                                                "Module export callable is missing module binding: " + methodName)) {
                         goto call_method_done;
                     }
 
-                    auto* classObject = dynamic_cast<ClassObject*>(&callableObject);
-                    if (classObject) {
-                        const auto& targetModule = classObject->modulePin();
-                        if (!targetModule) {
-                            throw std::runtime_error("Class object is not bound to module: " + classObject->className());
-                        }
-
-                        const std::size_t classIndex = classObject->classIndex();
-                        const Value instanceRef = makeScriptInstance(context,
-                                                                     functionType_,
-                                                                     classType_,
-                                                                     nativeFunctionType_,
-                                                                     moduleType_,
-                                                                     hosts_,
-                                                                     instanceType_,
-                                                                     *targetModule,
-                                                                     targetModule,
-                                                                     classIndex);
-
-                        std::size_t ctorFunctionIndex = 0;
-                        if (!tryFindClassMethodInModule(*targetModule, classIndex, "__new__", ctorFunctionIndex)) {
-                            throw std::runtime_error("Class is missing required constructor __new__: " + classObject->className());
-                        }
-
-                        std::vector<Value> ctorInvokeArgs;
-                        ctorInvokeArgs.reserve(argScratch.size() + 1);
-                        ctorInvokeArgs.push_back(instanceRef);
-                        ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
-                        pushCallFrame(context,
-                                      targetModule,
-                                      ctorFunctionIndex,
-                                      ctorInvokeArgs,
-                                      true,
-                                      instanceRef);
-                        goto call_method_done;
-                    }
-
-                    if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
-                        const std::size_t callerFrameIndex = context.frames.size() - 1;
-                        VmHostContext hostContext(*this, context);
-                        const Value result = nativeFunction->invoke(hostContext, argScratch);
-                        if (callerFrameIndex < context.frames.size()) {
-                            pushRaw(context.frames[callerFrameIndex].stack, context.frames[callerFrameIndex].stackTop, result);
-                        }
+                    if (tryInvokeClassOrNativeCallable(callableObject, argScratch)) {
                         goto call_method_done;
                     }
 
@@ -1769,47 +1894,7 @@ load_attr_done:
                     throw std::runtime_error("Module object is not loaded: " + moduleObj->moduleName());
                 }
 
-                for (std::size_t i = 0; i < modulePin->functions.size(); ++i) {
-                    if (modulePin->functions[i].name == methodName) {
-                        pushCallFrame(context,
-                                      modulePin,
-                                      i,
-                                      argScratch);
-                        goto call_method_done;
-                    }
-                }
-
-                for (std::size_t i = 0; i < modulePin->classes.size(); ++i) {
-                    if (modulePin->classes[i].name != methodName) {
-                        continue;
-                    }
-
-                    const Value instanceRef = makeScriptInstance(context,
-                                                                 functionType_,
-                                                                 classType_,
-                                                                 nativeFunctionType_,
-                                                                 moduleType_,
-                                                                 hosts_,
-                                                                 instanceType_,
-                                                                 *modulePin,
-                                                                 modulePin,
-                                                                 i);
-
-                    std::size_t ctorFunctionIndex = 0;
-                    if (!tryFindClassMethodInModule(*modulePin, i, "__new__", ctorFunctionIndex)) {
-                        throw std::runtime_error("Class is missing required constructor __new__: " + methodName);
-                    }
-
-                    std::vector<Value> ctorInvokeArgs;
-                    ctorInvokeArgs.reserve(argScratch.size() + 1);
-                    ctorInvokeArgs.push_back(instanceRef);
-                    ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
-                    pushCallFrame(context,
-                                  modulePin,
-                                  ctorFunctionIndex,
-                                  ctorInvokeArgs,
-                                  true,
-                                  instanceRef);
+                if (tryInvokeModuleNamedCallable(modulePin, methodName, argScratch)) {
                     goto call_method_done;
                 }
 
@@ -1848,17 +1933,18 @@ load_attr_done:
                     }
 
                     Object& callableObject = getObject(context, callable);
-                    auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject);
-                    if (!fnObject) {
-                        throw std::runtime_error("Object property is not function object: " + methodName);
+                    if (tryInvokeScriptCallable(callableObject,
+                                                callValueModule,
+                                                argScratch,
+                                                "Object property callable is missing module binding: " + methodName)) {
+                        break;
                     }
 
-                    const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : frameModule;
-                    pushCallFrame(context,
-                                  callModule,
-                                  fnObject->functionIndex(),
-                                  argScratch);
-                    break;
+                    if (tryInvokeClassOrNativeCallable(callableObject, argScratch)) {
+                        break;
+                    }
+
+                    throw std::runtime_error("Object property is not a supported callable object: " + methodName);
                 }
 
                 std::size_t classMethodIndex = 0;
@@ -1907,60 +1993,14 @@ call_method_done:
             }
 
             Object& callableObject = getObject(context, callable);
-            auto* fnObject = dynamic_cast<FunctionObject*>(&callableObject);
-            if (fnObject) {
-                const auto callModule = fnObject->modulePin() ? fnObject->modulePin() : frameModule;
-                pushCallFrame(context,
-                              callModule,
-                              fnObject->functionIndex(),
-                              argScratch);
+            if (tryInvokeScriptCallable(callableObject,
+                                        frameModule,
+                                        argScratch,
+                                        "Callable object is missing module binding")) {
                 break;
             }
 
-            auto* classObject = dynamic_cast<ClassObject*>(&callableObject);
-            if (classObject) {
-                const auto& targetModule = classObject->modulePin();
-                if (!targetModule) {
-                    throw std::runtime_error("Class object is not bound to module: " + classObject->className());
-                }
-
-                const std::size_t classIndex = classObject->classIndex();
-                const Value instanceRef = makeScriptInstance(context,
-                                                             functionType_,
-                                                             classType_,
-                                                             nativeFunctionType_,
-                                                             moduleType_,
-                                                             hosts_,
-                                                             instanceType_,
-                                                             *targetModule,
-                                                             targetModule,
-                                                             classIndex);
-
-                std::size_t ctorFunctionIndex = 0;
-                if (!tryFindClassMethodInModule(*targetModule, classIndex, "__new__", ctorFunctionIndex)) {
-                    throw std::runtime_error("Class is missing required constructor __new__: " + classObject->className());
-                }
-
-                std::vector<Value> ctorInvokeArgs;
-                ctorInvokeArgs.reserve(argScratch.size() + 1);
-                ctorInvokeArgs.push_back(instanceRef);
-                ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
-                pushCallFrame(context,
-                              targetModule,
-                              ctorFunctionIndex,
-                              ctorInvokeArgs,
-                              true,
-                              instanceRef);
-                break;
-            }
-
-            if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
-                const std::size_t callerFrameIndex = context.frames.size() - 1;
-                VmHostContext hostContext(*this, context);
-                const Value result = nativeFunction->invoke(hostContext, argScratch);
-                if (callerFrameIndex < context.frames.size()) {
-                    pushRaw(context.frames[callerFrameIndex].stack, context.frames[callerFrameIndex].stackTop, result);
-                }
+            if (tryInvokeClassOrNativeCallable(callableObject, argScratch)) {
                 break;
             }
 
@@ -2037,15 +2077,7 @@ call_method_done:
             --frame.stackTop;
             break;
         case OpCode::MoveLocalToReg:
-            writeRegister(ins.b, normalizeRuntimeValue(context,
-                                                       functionType_,
-                                                       classType_,
-                                                       nativeFunctionType_,
-                                                       moduleType_,
-                                                       hosts_,
-                                                       frameModule,
-                                                       frame.locals.at(ins.a),
-                                                       false));
+            writeRegister(ins.b, resolveSlotValue(SlotType::Local, ins.a));
             break;
         case OpCode::MoveNameToReg: {
             const auto& symbolName = frameModule->strings.at(ins.a);
@@ -2071,7 +2103,8 @@ call_method_done:
                                                        true));
             break;
         case OpCode::LoadConst:
-            frame.locals.at(ins.b) = normalizeRuntimeValue(context,
+            {
+                const Value loaded = normalizeRuntimeValue(context,
                                                            functionType_,
                                                            classType_,
                                                            nativeFunctionType_,
@@ -2080,12 +2113,97 @@ call_method_done:
                                                            frameModule,
                                                            frameModule->constants.at(ins.a),
                                                            true);
+                Value& localValue = frame.locals.at(ins.b);
+                if (localValue.isRef()) {
+                    Object* localObject = localValue.asRef();
+                    if (localObject) {
+                        if (auto* cell = dynamic_cast<UpvalueCellObject*>(localObject)) {
+                            rememberWriteBarrier(context, *cell, loaded);
+                            cell->value() = loaded;
+                            break;
+                        }
+                    }
+                }
+                localValue = loaded;
+            }
             break;
         case OpCode::PushReg:
             pushRaw(frame.stack, frame.stackTop, readRegister(ins.a));
             break;
+        case OpCode::CaptureLocal: {
+            // Convert a normal local into a shared upvalue cell on first capture.
+            // Later closures and the current frame both observe the same cell value.
+            Value& localValue = frame.locals.at(ins.a);
+            if (!(localValue.isRef() && localValue.asRef() != nullptr && dynamic_cast<UpvalueCellObject*>(localValue.asRef()) != nullptr)) {
+                localValue = emplaceObject(context, std::make_unique<UpvalueCellObject>(upvalueCellType_, localValue));
+            }
+            pushRaw(frame.stack, frame.stackTop, localValue);
+            break;
+        }
+        case OpCode::PushCapture:
+        case OpCode::LoadCapture: {
+            // Read captured value by-reference through its upvalue cell.
+            if (ins.a < 0 || static_cast<std::size_t>(ins.a) >= frame.captures.size()) {
+                throw std::runtime_error("Capture index out of range");
+            }
+            const Value captureRef = frame.captures[static_cast<std::size_t>(ins.a)];
+            Object& object = getObject(context, captureRef);
+            auto* cell = dynamic_cast<UpvalueCellObject*>(&object);
+            if (!cell) {
+                throw std::runtime_error("Capture is not an upvalue cell");
+            }
+            pushRaw(frame.stack, frame.stackTop, cell->value());
+            break;
+        }
+        case OpCode::StoreCapture: {
+            // Write captured value by-reference through the same upvalue cell.
+            if (ins.a < 0 || static_cast<std::size_t>(ins.a) >= frame.captures.size()) {
+                throw std::runtime_error("Capture index out of range");
+            }
+            const Value value = popRaw(frame.stack, frame.stackTop);
+            const Value captureRef = frame.captures[static_cast<std::size_t>(ins.a)];
+            Object& object = getObject(context, captureRef);
+            auto* cell = dynamic_cast<UpvalueCellObject*>(&object);
+            if (!cell) {
+                throw std::runtime_error("Capture is not an upvalue cell");
+            }
+            rememberWriteBarrier(context, *cell, value);
+            cell->value() = value;
+            break;
+        }
+        case OpCode::MakeClosure: {
+            const std::size_t captureCount = static_cast<std::size_t>(ins.b);
+            if (frame.stackTop < captureCount) {
+                throw std::runtime_error("Not enough captured values on stack");
+            }
+            std::vector<Value> captures;
+            captures.resize(captureCount);
+            for (std::size_t i = 0; i < captureCount; ++i) {
+                captures[captureCount - 1 - i] = popRaw(frame.stack, frame.stackTop);
+            }
+            const Value fnRef = makeLambdaObject(context,
+                                                 lambdaType_,
+                                                 static_cast<std::size_t>(ins.a),
+                                                 frameModule,
+                                                 std::move(captures));
+            pushRaw(frame.stack, frame.stackTop, fnRef);
+            break;
+        }
         case OpCode::StoreLocalFromReg:
-            frame.locals.at(ins.a) = readRegister(ins.b);
+            {
+                Value& localValue = frame.locals.at(ins.a);
+                if (localValue.isRef()) {
+                    Object* localObject = localValue.asRef();
+                    if (localObject) {
+                        if (auto* cell = dynamic_cast<UpvalueCellObject*>(localObject)) {
+                            rememberWriteBarrier(context, *cell, readRegister(ins.b));
+                            cell->value() = readRegister(ins.b);
+                            break;
+                        }
+                    }
+                }
+                localValue = readRegister(ins.b);
+            }
             break;
         case OpCode::StoreNameFromReg: {
             const auto& symbolName = frameModule->strings.at(ins.a);

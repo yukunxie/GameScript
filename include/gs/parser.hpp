@@ -10,6 +10,7 @@
 namespace gs {
 
 struct Expr;
+struct FunctionDecl;
 
 enum class ExprType {
     Number,
@@ -23,6 +24,7 @@ enum class ExprType {
     MethodCall,
     PropertyAccess,
     IndexAccess,
+    Lambda,
     AssignVariable,
     AssignProperty,
     AssignIndex
@@ -52,6 +54,7 @@ struct Expr {
     std::string methodName;
     std::string propertyName;
     std::unique_ptr<Expr> index;
+    std::unique_ptr<FunctionDecl> lambdaDecl;
 };
 
 enum class StmtType {
@@ -158,6 +161,7 @@ private:
     Expr parseFactor();
     Expr parseUnary();
     Expr parsePrimary();
+    bool isLambdaStart() const;
     std::string currentScopeName() const;
     std::string formatParseError(const char* message, const Token& token) const;
 

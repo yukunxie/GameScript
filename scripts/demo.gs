@@ -7,6 +7,10 @@ from module_math import add as plus;
 from module_math import add, hello as gg;
 
 let TOP_LEVEL_SENTINEL = 314;
+let LAMBDA_TOP_SCALE = 3;
+let TOP_MUL = (x) => {
+    return x * LAMBDA_TOP_SCALE;
+};
 
 fn test_load_const()
 {
@@ -218,6 +222,55 @@ fn benchmark_printf() {
     return checksum;
 }
 
+fn benchmark_lambda_closures_return()
+{
+    let base = 10;
+    let adder = (x, y) => {
+        let sum = x + y;
+        let preBase = base;
+        base = base + sum;
+        return base;
+    };
+    return adder;
+}
+
+fn benchmark_lambda_closures() {
+    let base = 10;
+    let adder = (x, y) => {
+        let sum = x + y;
+        base = base + sum;
+        return base;
+    };
+
+    let r1 = adder(1, 2);
+    let r2 = adder(3, 4);
+    assert(r1 == 13, "lambda r1 expected 13, actual {}", r1);
+    assert(r2 == 20, "lambda r2 expected 20, actual {}", r2);
+
+    print ("lambda closure adder: ", adder);
+
+    let shadow = (x) => {
+        let base = x + 1;
+        return base;
+    };
+    assert(shadow(5) == 6, "lambda shadow expected 6, actual {}", shadow(5));
+
+    let topR = TOP_MUL(7);
+    assert(topR == 21, "TOP_MUL expected 21, actual {}", topR);
+
+    let acc = 0;
+    for (i in range(0, 1000)) {
+        acc = acc + adder(i, 1);
+    }
+
+    assert(base == 500520, "lambda captured base expected 500520, actual {}", base);
+    assert(acc == 167187000, "lambda loop acc expected 167187000, actual {}", acc);
+
+    let checksum = r1 + r2 + shadow(9) + topR + acc + base + TOP_MUL(100);
+    assert(checksum == 167687884, "lambda benchmark checksum mismatch: {}", checksum);
+    return checksum;
+}
+
 fn run_bench(verbose) {
     if (verbose == 1) {
         print("[bench] suite start");
@@ -238,8 +291,15 @@ fn run_bench(verbose) {
     let checksum2 = benchmark_module_calls();
     let checksum3 = benchmark_iter_traversal();
     let checksum4 = benchmark_printf();
+    let checksum5 = benchmark_lambda_closures();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
+
+    let adder = benchmark_lambda_closures_return();
+    let r = adder(10, 20);
+    print ("adder(10, 20) returned", r);   
+    assert(r == 30 + 10, "closure returned from benchmark_lambda_closures_return expected to capture base 10, actual {}", r);
+
 
     if (verbose == 1) {
         print("[bench] passed groups", passed);
@@ -247,12 +307,13 @@ fn run_bench(verbose) {
         print("[bench] checksum2", checksum2);
         print("[bench] checksum3", checksum3);
         print("[bench] checksum4", checksum4);
+        print("[bench] checksum5", checksum5);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
     assert(passed == 6, "passed groups expected 6, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + checksum4 + reclaimed;
+    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + reclaimed;
 }
 
 fn ue_entry() {

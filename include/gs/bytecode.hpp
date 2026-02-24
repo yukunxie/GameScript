@@ -211,6 +211,11 @@ enum class OpCode : std::uint8_t {
     ConstToReg,
     LoadConst,
     PushReg,
+    CaptureLocal,
+    PushCapture,
+    LoadCapture,
+    StoreCapture,
+    MakeClosure,
     StoreLocalFromReg,
     StoreNameFromReg,
     PushLocal,
@@ -227,7 +232,10 @@ enum SlotType : std::uint8_t {
     None,
     Local,
     Constant,
-    Register
+    Register,
+    // Closure-captured variable slot (index into frame.captures).
+    // The capture points to an UpvalueCellObject so reads/writes are by-reference.
+    UpValue
 };
 
 struct Instruction {

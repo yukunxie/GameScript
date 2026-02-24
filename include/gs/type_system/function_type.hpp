@@ -1,25 +1,14 @@
 #pragma once
 
-#include "gs/type_system/type_base.hpp"
-
-#include <memory>
+#include "gs/type_system/script_callable_object.hpp"
 
 namespace gs {
 
-class FunctionObject : public Object {
+class FunctionObject : public ScriptCallableObjectBase {
 public:
     FunctionObject(const Type& typeRef,
                    std::size_t functionIndex,
                    std::shared_ptr<const Module> modulePin = nullptr);
-
-    const Type& getType() const override;
-    std::size_t functionIndex() const;
-    const std::shared_ptr<const Module>& modulePin() const;
-
-private:
-    const Type* type_;
-    std::size_t functionIndex_{0};
-    std::shared_ptr<const Module> modulePin_;
 };
 
 class FunctionType : public Type {

@@ -87,6 +87,9 @@ std::vector<Token> Tokenizer::tokenize() {
             if (!isAtEnd() && peek() == '=') {
                 advance();
                 tokens.push_back({TokenType::EqualEqual, "==", line, column});
+            } else if (!isAtEnd() && peek() == '>') {
+                advance();
+                tokens.push_back({TokenType::FatArrow, "=>", line, column});
             } else {
                 tokens.push_back({TokenType::Equal, "=", line, column});
             }

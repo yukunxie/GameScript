@@ -36,9 +36,15 @@ inline int stackDelta(const IRInstruction& instruction) {
     case OpCode::LoadName:
     case OpCode::PushName:
     case OpCode::PushReg:
+    case OpCode::CaptureLocal:
+    case OpCode::PushCapture:
+    case OpCode::LoadCapture:
         return 1;
+    case OpCode::MakeClosure:
+        return 1 - instruction.b;
     case OpCode::StoreName:
     case OpCode::StoreLocal:
+    case OpCode::StoreCapture:
     case OpCode::JumpIfFalse:
     case OpCode::Pop:
         return -1;

@@ -22,10 +22,12 @@ set(GS_LIB_SOURCES
     src/type_system/tuple_type.cpp
     src/type_system/dict_type.cpp
     src/type_system/function_type.cpp
+    src/type_system/lambda_type.cpp
     src/type_system/native_function_type.cpp
     src/type_system/class_type.cpp
     src/type_system/module_type.cpp
     src/type_system/script_instance_type.cpp
+    src/type_system/upvalue_cell_type.cpp
     src/tokenizer.cpp
     src/parser.cpp
     src/compiler.cpp
@@ -51,11 +53,14 @@ set(GS_LIB_HEADERS
     include/gs/type_system/list_type.hpp
     include/gs/type_system/tuple_type.hpp
     include/gs/type_system/dict_type.hpp
+    include/gs/type_system/script_callable_object.hpp
     include/gs/type_system/function_type.hpp
+    include/gs/type_system/lambda_type.hpp
     include/gs/type_system/native_function_type.hpp
     include/gs/type_system/class_type.hpp
     include/gs/type_system/module_type.hpp
     include/gs/type_system/script_instance_type.hpp
+    include/gs/type_system/upvalue_cell_type.hpp
     include/gs/vm.hpp
 )
 
