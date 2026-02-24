@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,6 +59,7 @@ struct Frame {
     std::vector<Value> locals;
     std::vector<Value> stack;
     std::size_t stackTop{0};
+    std::array<Value, 8> registers{Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil()};
     Value registerValue{Value::Nil()};
 };
 

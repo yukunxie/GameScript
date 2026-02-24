@@ -12,7 +12,9 @@ namespace gs {
 
 struct IRInstruction {
     OpCode op{};
+    SlotType aSlotType{SlotType::None};
     std::int32_t a{};
+    SlotType bSlotType{SlotType::None};
     std::int32_t b{};
     std::size_t line{0};
     std::size_t column{0};
@@ -41,7 +43,6 @@ inline int stackDelta(const IRInstruction& instruction) {
     case OpCode::Pop:
         return -1;
     case OpCode::JumpIfFalseReg:
-    case OpCode::JumpIfFalseLocal:
         return 0;
     case OpCode::Add:
     case OpCode::Sub:
@@ -53,6 +54,10 @@ inline int stackDelta(const IRInstruction& instruction) {
     case OpCode::NotEqual:
     case OpCode::LessEqual:
     case OpCode::GreaterEqual:
+        if (instruction.aSlotType != SlotType::None || instruction.bSlotType != SlotType::None) {
+            return 0;
+        }
+        return -1;
     case OpCode::StoreAttr:
         return -1;
     case OpCode::Negate:
@@ -91,18 +96,6 @@ inline int stackDelta(const IRInstruction& instruction) {
     case OpCode::LoadConst:
     case OpCode::StoreLocalFromReg:
     case OpCode::StoreNameFromReg:
-    case OpCode::AddLocalLocal:
-    case OpCode::SubLocalLocal:
-    case OpCode::MulLocalLocal:
-    case OpCode::DivLocalLocal:
-    case OpCode::LessLocalLocal:
-    case OpCode::GreaterLocalLocal:
-    case OpCode::EqualLocalLocal:
-    case OpCode::NotEqualLocalLocal:
-    case OpCode::LessEqualLocalLocal:
-    case OpCode::GreaterEqualLocalLocal:
-    case OpCode::NegLocal:
-    case OpCode::NotLocal:
         return 0;
     }
     return 0;
@@ -129,7 +122,11 @@ inline FunctionBytecode lowerFunctionIR(const FunctionIR& ir) {
     out.stackSlotCount = estimateStackSlots(ir);
     out.code.reserve(ir.code.size());
     for (const auto& instruction : ir.code) {
-        out.code.push_back({instruction.op, instruction.a, instruction.b});
+        out.code.push_back({instruction.op,
+                            instruction.aSlotType,
+                            instruction.a,
+                            instruction.bSlotType,
+                            instruction.b});
     }
     return out;
 }

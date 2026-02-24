@@ -174,6 +174,9 @@ void markRoots(ExecutionContext& context, bool youngOnly) {
     for (const auto& frame : context.frames) {
         markValue(context, frame.constructorInstance, youngOnly);
         markValue(context, frame.registerValue, youngOnly);
+        for (const auto& regValue : frame.registers) {
+            markValue(context, regValue, youngOnly);
+        }
         for (const auto& value : frame.locals) {
             markValue(context, value, youngOnly);
         }
@@ -1079,6 +1082,64 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
         }
 
         const Instruction ins = fn.code[frame.ip++];
+        const auto readRegister = [&](std::int32_t index) -> Value {
+            if (index < 0 || index >= static_cast<std::int32_t>(frame.registers.size())) {
+                throw std::runtime_error("Register index out of range");
+            }
+            if (index == 0) {
+                return frame.registerValue;
+            }
+            return frame.registers[static_cast<std::size_t>(index)];
+        };
+
+        const auto writeRegister = [&](std::int32_t index, const Value& value) {
+            if (index < 0 || index >= static_cast<std::int32_t>(frame.registers.size())) {
+                throw std::runtime_error("Register index out of range");
+            }
+            frame.registers[static_cast<std::size_t>(index)] = value;
+            if (index == 0) {
+                frame.registerValue = value;
+            }
+        };
+
+        const auto resolveSlotValue = [&](SlotType slotType, std::int32_t index) -> Value {
+            switch (slotType) {
+            case SlotType::None:
+                return Value::Nil();
+            case SlotType::Local:
+                return normalizeRuntimeValue(context,
+                                             functionType_,
+                                             classType_,
+                                             nativeFunctionType_,
+                                             moduleType_,
+                                             hosts_,
+                                             frameModule,
+                                             frame.locals.at(index),
+                                             false);
+            case SlotType::Constant:
+                return normalizeRuntimeValue(context,
+                                             functionType_,
+                                             classType_,
+                                             nativeFunctionType_,
+                                             moduleType_,
+                                             hosts_,
+                                             frameModule,
+                                             frameModule->constants.at(index),
+                                             true);
+            case SlotType::Register:
+                return normalizeRuntimeValue(context,
+                                             functionType_,
+                                             classType_,
+                                             nativeFunctionType_,
+                                             moduleType_,
+                                             hosts_,
+                                             frameModule,
+                                             readRegister(index),
+                                             false);
+            }
+            return Value::Nil();
+        };
+
         switch (ins.op) {
         case OpCode::PushConst: {
             Value value = normalizeRuntimeValue(context,
@@ -1151,6 +1212,20 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Add: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                Value out = Value::Nil();
+                if (lhs.isInt() && rhs.isInt()) {
+                    out = Value::Int(lhs.asInt() + rhs.asInt());
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    out = Value::Float(toDouble(lhs) + toDouble(rhs));
+                } else {
+                    out = makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs));
+                }
+                writeRegister(0, out);
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1167,6 +1242,18 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Sub: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (lhs.isInt() && rhs.isInt()) {
+                    writeRegister(0, Value::Int(lhs.asInt() - rhs.asInt()));
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    writeRegister(0, Value::Float(toDouble(lhs) - toDouble(rhs)));
+                } else {
+                    throw std::runtime_error("Sub expects numeric operands");
+                }
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1183,6 +1270,18 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Mul: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (lhs.isInt() && rhs.isInt()) {
+                    writeRegister(0, Value::Int(lhs.asInt() * rhs.asInt()));
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    writeRegister(0, Value::Float(toDouble(lhs) * toDouble(rhs)));
+                } else {
+                    throw std::runtime_error("Mul expects numeric operands");
+                }
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1199,6 +1298,19 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Div: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("Div expects numeric operands");
+                }
+                const double divisor = toDouble(rhs);
+                if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                    throw std::runtime_error("Division by zero");
+                }
+                writeRegister(0, Value::Float(toDouble(lhs) / divisor));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1216,6 +1328,15 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::LessThan: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("LessThan expects numeric operands");
+                }
+                writeRegister(0, Value::Int(toDouble(lhs) < toDouble(rhs) ? 1 : 0));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1229,6 +1350,15 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::GreaterThan: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("GreaterThan expects numeric operands");
+                }
+                writeRegister(0, Value::Int(toDouble(lhs) > toDouble(rhs) ? 1 : 0));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1242,6 +1372,12 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Equal: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                writeRegister(0, Value::Int(valueEquals(context, lhs, rhs) ? 1 : 0));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1252,6 +1388,12 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::NotEqual: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                writeRegister(0, Value::Int(valueEquals(context, lhs, rhs) ? 0 : 1));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1262,6 +1404,15 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::LessEqual: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("LessEqual expects numeric operands");
+                }
+                writeRegister(0, Value::Int(toDouble(lhs) <= toDouble(rhs) ? 1 : 0));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1275,6 +1426,15 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::GreaterEqual: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("GreaterEqual expects numeric operands");
+                }
+                writeRegister(0, Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0));
+                break;
+            }
             if (frame.stackTop < 2) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1288,6 +1448,17 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Negate: {
+            if (ins.aSlotType != SlotType::None) {
+                const Value operand = resolveSlotValue(ins.aSlotType, ins.a);
+                if (operand.isInt()) {
+                    writeRegister(0, Value::Int(-operand.asInt()));
+                } else if (operand.isFloat()) {
+                    writeRegister(0, Value::Float(-operand.asFloat()));
+                } else {
+                    throw std::runtime_error("Negate expects numeric operand");
+                }
+                break;
+            }
             if (frame.stackTop == 0) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1302,6 +1473,11 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::Not: {
+            if (ins.aSlotType != SlotType::None) {
+                const Value operand = resolveSlotValue(ins.aSlotType, ins.a);
+                writeRegister(0, Value::Int(toBoolInt(operand) == 0 ? 1 : 0));
+                break;
+            }
             if (frame.stackTop == 0) {
                 throw std::runtime_error("Stack underflow");
             }
@@ -1335,21 +1511,6 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                      false);
             if (toBoolInt(cond) == 0) {
                 frame.ip = static_cast<std::size_t>(ins.a);
-            }
-            break;
-        }
-        case OpCode::JumpIfFalseLocal: {
-            const Value cond = normalizeRuntimeValue(context,
-                                                     functionType_,
-                                                     classType_,
-                                                     nativeFunctionType_,
-                                                     moduleType_,
-                                                     hosts_,
-                                                     frameModule,
-                                                     frame.locals.at(ins.a),
-                                                     false);
-            if (toBoolInt(cond) == 0) {
-                frame.ip = static_cast<std::size_t>(ins.b);
             }
             break;
         }
@@ -1876,38 +2037,38 @@ call_method_done:
             --frame.stackTop;
             break;
         case OpCode::MoveLocalToReg:
-            frame.registerValue = normalizeRuntimeValue(context,
-                                                        functionType_,
-                                                        classType_,
-                                                        nativeFunctionType_,
-                                                        moduleType_,
-                                                        hosts_,
-                                                        frameModule,
-                                                        frame.locals.at(ins.a),
-                                                        false);
+            writeRegister(ins.b, normalizeRuntimeValue(context,
+                                                       functionType_,
+                                                       classType_,
+                                                       nativeFunctionType_,
+                                                       moduleType_,
+                                                       hosts_,
+                                                       frameModule,
+                                                       frame.locals.at(ins.a),
+                                                       false));
             break;
         case OpCode::MoveNameToReg: {
             const auto& symbolName = frameModule->strings.at(ins.a);
-            frame.registerValue = resolveRuntimeName(context,
-                                                     functionType_,
-                                                     classType_,
-                                                     nativeFunctionType_,
-                                                     moduleType_,
-                                                     hosts_,
-                                                     frameModule,
-                                                     symbolName);
+            writeRegister(ins.b, resolveRuntimeName(context,
+                                                    functionType_,
+                                                    classType_,
+                                                    nativeFunctionType_,
+                                                    moduleType_,
+                                                    hosts_,
+                                                    frameModule,
+                                                    symbolName));
             break;
         }
         case OpCode::ConstToReg:
-            frame.registerValue = normalizeRuntimeValue(context,
-                                                        functionType_,
-                                                        classType_,
-                                                        nativeFunctionType_,
-                                                        moduleType_,
-                                                        hosts_,
-                                                        frameModule,
-                                                        frameModule->constants.at(ins.a),
-                                                        true);
+            writeRegister(ins.b, normalizeRuntimeValue(context,
+                                                       functionType_,
+                                                       classType_,
+                                                       nativeFunctionType_,
+                                                       moduleType_,
+                                                       hosts_,
+                                                       frameModule,
+                                                       frameModule->constants.at(ins.a),
+                                                       true));
             break;
         case OpCode::LoadConst:
             frame.locals.at(ins.b) = normalizeRuntimeValue(context,
@@ -1921,142 +2082,14 @@ call_method_done:
                                                            true);
             break;
         case OpCode::PushReg:
-            pushRaw(frame.stack, frame.stackTop, frame.registerValue);
+            pushRaw(frame.stack, frame.stackTop, readRegister(ins.a));
             break;
         case OpCode::StoreLocalFromReg:
-            frame.locals.at(ins.a) = frame.registerValue;
+            frame.locals.at(ins.a) = readRegister(ins.b);
             break;
         case OpCode::StoreNameFromReg: {
             const auto& symbolName = frameModule->strings.at(ins.a);
-            storeRuntimeGlobal(context, frameModule, symbolName, frame.registerValue);
-            break;
-        }
-        case OpCode::AddLocalLocal:
-        case OpCode::SubLocalLocal:
-        case OpCode::MulLocalLocal:
-        case OpCode::DivLocalLocal:
-        case OpCode::LessLocalLocal:
-        case OpCode::GreaterLocalLocal:
-        case OpCode::EqualLocalLocal:
-        case OpCode::NotEqualLocalLocal:
-        case OpCode::LessEqualLocalLocal:
-        case OpCode::GreaterEqualLocalLocal:
-        case OpCode::NegLocal:
-        case OpCode::NotLocal: {
-            if (ins.op == OpCode::NegLocal || ins.op == OpCode::NotLocal) {
-                const Value operand = normalizeRuntimeValue(context,
-                                                            functionType_,
-                                                            classType_,
-                                                            nativeFunctionType_,
-                                                            moduleType_,
-                                                            hosts_,
-                                                            frameModule,
-                                                            frame.locals.at(ins.a),
-                                                            false);
-                if (ins.op == OpCode::NegLocal) {
-                    if (operand.isInt()) {
-                        frame.registerValue = Value::Int(-operand.asInt());
-                    } else if (operand.isFloat()) {
-                        frame.registerValue = Value::Float(-operand.asFloat());
-                    } else {
-                        throw std::runtime_error("Negate expects numeric operand");
-                    }
-                } else {
-                    frame.registerValue = Value::Int(toBoolInt(operand) == 0 ? 1 : 0);
-                }
-                break;
-            }
-
-            const Value lhs = normalizeRuntimeValue(context,
-                                                    functionType_,
-                                                    classType_,
-                                                    nativeFunctionType_,
-                                                    moduleType_,
-                                                    hosts_,
-                                                    frameModule,
-                                                    frame.locals.at(ins.a),
-                                                    false);
-            const Value rhs = normalizeRuntimeValue(context,
-                                                    functionType_,
-                                                    classType_,
-                                                    nativeFunctionType_,
-                                                    moduleType_,
-                                                    hosts_,
-                                                    frameModule,
-                                                    frame.locals.at(ins.b),
-                                                    false);
-            switch (ins.op) {
-            case OpCode::AddLocalLocal:
-                if (lhs.isInt() && rhs.isInt()) {
-                    frame.registerValue = Value::Int(lhs.asInt() + rhs.asInt());
-                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
-                    frame.registerValue = Value::Float(toDouble(lhs) + toDouble(rhs));
-                } else {
-                    frame.registerValue = makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs));
-                }
-                break;
-            case OpCode::SubLocalLocal:
-                if (lhs.isInt() && rhs.isInt()) {
-                    frame.registerValue = Value::Int(lhs.asInt() - rhs.asInt());
-                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
-                    frame.registerValue = Value::Float(toDouble(lhs) - toDouble(rhs));
-                } else {
-                    throw std::runtime_error("Sub expects numeric operands");
-                }
-                break;
-            case OpCode::MulLocalLocal:
-                if (lhs.isInt() && rhs.isInt()) {
-                    frame.registerValue = Value::Int(lhs.asInt() * rhs.asInt());
-                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
-                    frame.registerValue = Value::Float(toDouble(lhs) * toDouble(rhs));
-                } else {
-                    throw std::runtime_error("Mul expects numeric operands");
-                }
-                break;
-            case OpCode::DivLocalLocal: {
-                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
-                    throw std::runtime_error("Div expects numeric operands");
-                }
-                const double divisor = toDouble(rhs);
-                if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                    throw std::runtime_error("Division by zero");
-                }
-                frame.registerValue = Value::Float(toDouble(lhs) / divisor);
-                break;
-            }
-            case OpCode::LessLocalLocal:
-                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
-                    throw std::runtime_error("LessThan expects numeric operands");
-                }
-                frame.registerValue = Value::Int(toDouble(lhs) < toDouble(rhs) ? 1 : 0);
-                break;
-            case OpCode::GreaterLocalLocal:
-                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
-                    throw std::runtime_error("GreaterThan expects numeric operands");
-                }
-                frame.registerValue = Value::Int(toDouble(lhs) > toDouble(rhs) ? 1 : 0);
-                break;
-            case OpCode::EqualLocalLocal:
-                frame.registerValue = Value::Int(valueEquals(context, lhs, rhs) ? 1 : 0);
-                break;
-            case OpCode::NotEqualLocalLocal:
-                frame.registerValue = Value::Int(valueEquals(context, lhs, rhs) ? 0 : 1);
-                break;
-            case OpCode::LessEqualLocalLocal:
-                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
-                    throw std::runtime_error("LessEqual expects numeric operands");
-                }
-                frame.registerValue = Value::Int(toDouble(lhs) <= toDouble(rhs) ? 1 : 0);
-                break;
-            case OpCode::GreaterEqualLocalLocal:
-                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
-                    throw std::runtime_error("GreaterEqual expects numeric operands");
-                }
-                frame.registerValue = Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0);
-                break;
-            default:
-                break;
-            }
+            storeRuntimeGlobal(context, frameModule, symbolName, readRegister(ins.b));
             break;
         }
         }

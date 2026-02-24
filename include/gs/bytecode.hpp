@@ -190,7 +190,6 @@ enum class OpCode : std::uint8_t {
     Jump,
     JumpIfFalse,
     JumpIfFalseReg,
-    JumpIfFalseLocal,
     CallHost,
     CallFunc,
     NewInstance,
@@ -214,26 +213,29 @@ enum class OpCode : std::uint8_t {
     PushReg,
     StoreLocalFromReg,
     StoreNameFromReg,
-    AddLocalLocal,
-    SubLocalLocal,
-    MulLocalLocal,
-    DivLocalLocal,
-    LessLocalLocal,
-    GreaterLocalLocal,
-    EqualLocalLocal,
-    NotEqualLocalLocal,
-    LessEqualLocalLocal,
-    GreaterEqualLocalLocal,
-    NegLocal,
-    NotLocal,
     PushLocal,
     PushName
 };
 
+//struct Instruction {
+//    OpCode op{};
+//    std::int32_t a{};
+//    std::int32_t b{};
+//};
+
+enum SlotType : std::uint8_t {
+    None,
+    Local,
+    Constant,
+    Register
+};
+
 struct Instruction {
     OpCode op{};
-    std::int32_t a{};
-    std::int32_t b{};
+    SlotType aSlotType = SlotType::None;
+    std::int32_t a : 24 = -1;
+    SlotType bSlotType = SlotType::None;
+    std::int32_t b : 24 = -1;
 };
 
 struct FunctionBytecode {

@@ -70,7 +70,6 @@ const char* opcodeName(OpCode op) {
     case OpCode::Jump: return "Jump";
     case OpCode::JumpIfFalse: return "JumpIfFalse";
     case OpCode::JumpIfFalseReg: return "JumpIfFalseReg";
-    case OpCode::JumpIfFalseLocal: return "JumpIfFalseLocal";
     case OpCode::CallHost: return "CallHost";
     case OpCode::CallFunc: return "CallFunc";
     case OpCode::NewInstance: return "NewInstance";
@@ -94,18 +93,6 @@ const char* opcodeName(OpCode op) {
     case OpCode::PushReg: return "PushReg";
     case OpCode::StoreLocalFromReg: return "StoreLocalFromReg";
     case OpCode::StoreNameFromReg: return "StoreNameFromReg";
-    case OpCode::AddLocalLocal: return "AddLocalLocal";
-    case OpCode::SubLocalLocal: return "SubLocalLocal";
-    case OpCode::MulLocalLocal: return "MulLocalLocal";
-    case OpCode::DivLocalLocal: return "DivLocalLocal";
-    case OpCode::LessLocalLocal: return "LessLocalLocal";
-    case OpCode::GreaterLocalLocal: return "GreaterLocalLocal";
-    case OpCode::EqualLocalLocal: return "EqualLocalLocal";
-    case OpCode::NotEqualLocalLocal: return "NotEqualLocalLocal";
-    case OpCode::LessEqualLocalLocal: return "LessEqualLocalLocal";
-    case OpCode::GreaterEqualLocalLocal: return "GreaterEqualLocalLocal";
-    case OpCode::NegLocal: return "NegLocal";
-    case OpCode::NotLocal: return "NotLocal";
     case OpCode::PushLocal: return "PushLocal";
     case OpCode::PushName: return "PushName";
     }
@@ -156,6 +143,28 @@ std::string formatLocalSlotForDis(std::int32_t slot, const FunctionIR* ir) {
     return text + "{tmp:" + localName + "}";
 }
 
+std::string formatSlotOperandForDis(const Module& module,
+                                    SlotType slotType,
+                                    std::int32_t slot,
+                                    const FunctionIR* ir) {
+    switch (slotType) {
+    case SlotType::None:
+        return "none";
+    case SlotType::Local:
+        return formatLocalSlotForDis(slot, ir);
+    case SlotType::Constant: {
+        const auto index = static_cast<std::size_t>(slot);
+        if (index < module.constants.size()) {
+            return std::string("const[") + std::to_string(slot) + "]=" + valueForDis(module, module.constants[index]);
+        }
+        return std::string("const[") + std::to_string(slot) + "]";
+    }
+    case SlotType::Register:
+        return std::string("reg[") + std::to_string(slot) + "]";
+    }
+    return "?";
+}
+
 std::string bytecodeOperandHint(const Module& module, const Instruction& ins, const FunctionIR* ir = nullptr) {
     switch (ins.op) {
     case OpCode::PushConst: {
@@ -190,8 +199,6 @@ std::string bytecodeOperandHint(const Module& module, const Instruction& ins, co
     case OpCode::JumpIfFalse:
     case OpCode::JumpIfFalseReg:
         return std::string("target=") + std::to_string(ins.a);
-    case OpCode::JumpIfFalseLocal:
-        return formatLocalSlotForDis(ins.a, ir) + " target=" + std::to_string(ins.b);
     case OpCode::LoadLocal:
     case OpCode::PushLocal:
     case OpCode::StoreLocal:
@@ -221,27 +228,34 @@ std::string bytecodeOperandHint(const Module& module, const Instruction& ins, co
         }
         return std::string("const[") + std::to_string(ins.a) + "]";
     }
-    case OpCode::AddLocalLocal:
-    case OpCode::SubLocalLocal:
-    case OpCode::MulLocalLocal:
-    case OpCode::DivLocalLocal:
-    case OpCode::LessLocalLocal:
-    case OpCode::GreaterLocalLocal:
-    case OpCode::EqualLocalLocal:
-    case OpCode::NotEqualLocalLocal:
-    case OpCode::LessEqualLocalLocal:
-    case OpCode::GreaterEqualLocalLocal:
-        return formatLocalSlotForDis(ins.a, ir) + ", " + formatLocalSlotForDis(ins.b, ir) + " -> reg";
-    case OpCode::NegLocal:
-    case OpCode::NotLocal:
-        return formatLocalSlotForDis(ins.a, ir) + " -> reg";
+    case OpCode::Add:
+    case OpCode::Sub:
+    case OpCode::Mul:
+    case OpCode::Div:
+    case OpCode::LessThan:
+    case OpCode::GreaterThan:
+    case OpCode::Equal:
+    case OpCode::NotEqual:
+    case OpCode::LessEqual:
+    case OpCode::GreaterEqual:
+        if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+            return formatSlotOperandForDis(module, ins.aSlotType, ins.a, ir) + ", " +
+                   formatSlotOperandForDis(module, ins.bSlotType, ins.b, ir) + " -> reg[0]";
+        }
+        return {};
+    case OpCode::Negate:
+    case OpCode::Not:
+        if (ins.aSlotType != SlotType::None) {
+            return formatSlotOperandForDis(module, ins.aSlotType, ins.a, ir) + " -> reg[0]";
+        }
+        return {};
     default:
         return {};
     }
 }
 
 std::string irOperandHint(const Module& module, const IRInstruction& ins) {
-    const Instruction lowered{ins.op, ins.a, ins.b};
+    const Instruction lowered{ins.op, ins.aSlotType, ins.a, ins.bSlotType, ins.b};
     return bytecodeOperandHint(module, lowered);
 }
 
@@ -1115,22 +1129,24 @@ void emit(std::vector<IRInstruction>& code,
           std::int32_t a = 0,
           std::int32_t b = 0,
           std::size_t line = 0,
-          std::size_t column = 0) {
-    code.push_back({op, a, b, line, column});
+          std::size_t column = 0,
+          SlotType aSlotType = SlotType::None,
+          SlotType bSlotType = SlotType::None) {
+    code.push_back({op, aSlotType, a, bSlotType, b, line, column});
 }
 
 std::size_t emitJump(std::vector<IRInstruction>& code,
                      OpCode op,
                      std::size_t line = 0,
                      std::size_t column = 0) {
-    code.push_back({op, -1, 0, line, column});
+    code.push_back({op, SlotType::None, -1, SlotType::None, 0, line, column});
     return code.size() - 1;
 }
 
 std::size_t emitJumpIfFalseReg(std::vector<IRInstruction>& code,
                                std::size_t line = 0,
                                std::size_t column = 0) {
-    code.push_back({OpCode::JumpIfFalseReg, -1, 0, line, column});
+    code.push_back({OpCode::JumpIfFalseReg, SlotType::None, -1, SlotType::None, 0, line, column});
     return code.size() - 1;
 }
 
@@ -1216,10 +1232,24 @@ bool tryCompileExprToRegister(const Expr& expr,
 
         switch (expr.unaryOp) {
         case TokenType::Minus:
-            emit(code, OpCode::NegLocal, static_cast<std::int32_t>(operand.localSlot), 0);
+            emit(code,
+                 OpCode::Negate,
+                 static_cast<std::int32_t>(operand.localSlot),
+                 0,
+                 0,
+                 0,
+                 SlotType::Local,
+                 SlotType::None);
             return true;
         case TokenType::Bang:
-            emit(code, OpCode::NotLocal, static_cast<std::int32_t>(operand.localSlot), 0);
+            emit(code,
+                 OpCode::Not,
+                 static_cast<std::int32_t>(operand.localSlot),
+                 0,
+                 0,
+                 0,
+                 SlotType::Local,
+                 SlotType::None);
             return true;
         default:
             return false;
@@ -1248,34 +1278,34 @@ bool tryCompileExprToRegister(const Expr& expr,
 
         switch (expr.binaryOp) {
         case TokenType::Plus:
-            emit(code, OpCode::AddLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::Add, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::Minus:
-            emit(code, OpCode::SubLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::Sub, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::Star:
-            emit(code, OpCode::MulLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::Mul, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::Slash:
-            emit(code, OpCode::DivLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::Div, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::Less:
-            emit(code, OpCode::LessLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::LessThan, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::Greater:
-            emit(code, OpCode::GreaterLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::GreaterThan, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::EqualEqual:
-            emit(code, OpCode::EqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::Equal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::BangEqual:
-            emit(code, OpCode::NotEqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::NotEqual, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::LessEqual:
-            emit(code, OpCode::LessEqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::LessEqual, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         case TokenType::GreaterEqual:
-            emit(code, OpCode::GreaterEqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            emit(code, OpCode::GreaterEqual, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot), 0, 0, SlotType::Local, SlotType::Local);
             return true;
         default:
             return false;
@@ -1286,18 +1316,18 @@ bool tryCompileExprToRegister(const Expr& expr,
     }
 }
 
-bool tryGetLocalLocalBinaryOp(TokenType token, OpCode& outOp) {
+bool tryGetBinaryOp(TokenType token, OpCode& outOp) {
     switch (token) {
-    case TokenType::Plus: outOp = OpCode::AddLocalLocal; return true;
-    case TokenType::Minus: outOp = OpCode::SubLocalLocal; return true;
-    case TokenType::Star: outOp = OpCode::MulLocalLocal; return true;
-    case TokenType::Slash: outOp = OpCode::DivLocalLocal; return true;
-    case TokenType::Less: outOp = OpCode::LessLocalLocal; return true;
-    case TokenType::Greater: outOp = OpCode::GreaterLocalLocal; return true;
-    case TokenType::EqualEqual: outOp = OpCode::EqualLocalLocal; return true;
-    case TokenType::BangEqual: outOp = OpCode::NotEqualLocalLocal; return true;
-    case TokenType::LessEqual: outOp = OpCode::LessEqualLocalLocal; return true;
-    case TokenType::GreaterEqual: outOp = OpCode::GreaterEqualLocalLocal; return true;
+    case TokenType::Plus: outOp = OpCode::Add; return true;
+    case TokenType::Minus: outOp = OpCode::Sub; return true;
+    case TokenType::Star: outOp = OpCode::Mul; return true;
+    case TokenType::Slash: outOp = OpCode::Div; return true;
+    case TokenType::Less: outOp = OpCode::LessThan; return true;
+    case TokenType::Greater: outOp = OpCode::GreaterThan; return true;
+    case TokenType::EqualEqual: outOp = OpCode::Equal; return true;
+    case TokenType::BangEqual: outOp = OpCode::NotEqual; return true;
+    case TokenType::LessEqual: outOp = OpCode::LessEqual; return true;
+    case TokenType::GreaterEqual: outOp = OpCode::GreaterEqual; return true;
     default: return false;
     }
 }
@@ -1480,6 +1510,7 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
     };
 
     struct LoweredValue {
+        SlotType slotType{SlotType::Local};
         std::size_t slot{0};
         bool releasable{false};
         std::string constKey;
@@ -1489,10 +1520,10 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
     lowerExprToLocalSlot = [&](const Expr& node, bool requireStoredSlot, LoweredValue& lowered) -> bool {
         Value constValue = Value::Nil();
         if (tryExtractConstValue(node, module, constValue)) {
-            const std::string key = makeConstTempKey(constValue);
-            lowered.slot = acquireConstSlot(key);
+            lowered.slot = static_cast<std::size_t>(addConstant(module, constValue));
+            lowered.slotType = SlotType::Constant;
             lowered.releasable = false;
-            lowered.constKey = key;
+            lowered.constKey.clear();
             return true;
         }
 
@@ -1504,6 +1535,7 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
                                                               node.name);
             if (resolved.found) {
                 lowered.slot = resolved.localSlot;
+                lowered.slotType = SlotType::Local;
                 lowered.releasable = false;
                 lowered.constKey.clear();
                 return true;
@@ -1518,10 +1550,24 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
 
             switch (node.unaryOp) {
             case TokenType::Minus:
-                emit(out.code, OpCode::NegLocal, static_cast<std::int32_t>(operand.slot), 0);
+                emit(out.code,
+                     OpCode::Negate,
+                     static_cast<std::int32_t>(operand.slot),
+                     0,
+                     0,
+                     0,
+                     operand.slotType,
+                     SlotType::None);
                 break;
             case TokenType::Bang:
-                emit(out.code, OpCode::NotLocal, static_cast<std::int32_t>(operand.slot), 0);
+                emit(out.code,
+                     OpCode::Not,
+                     static_cast<std::int32_t>(operand.slot),
+                     0,
+                     0,
+                     0,
+                     operand.slotType,
+                     SlotType::None);
                 break;
             default:
                 return false;
@@ -1546,6 +1592,7 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
                  OpCode::StoreLocalFromReg,
                  static_cast<std::int32_t>(tempSlot),
                  0);
+              lowered.slotType = SlotType::Local;
             lowered.slot = tempSlot;
             lowered.releasable = true;
             lowered.constKey.clear();
@@ -1553,8 +1600,8 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
         }
 
         if (node.type == ExprType::Binary && node.left && node.right) {
-            OpCode op = OpCode::AddLocalLocal;
-            if (!tryGetLocalLocalBinaryOp(node.binaryOp, op)) {
+            OpCode op = OpCode::Add;
+            if (!tryGetBinaryOp(node.binaryOp, op)) {
                 return false;
             }
 
@@ -1570,7 +1617,11 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
             emit(out.code,
                  op,
                  static_cast<std::int32_t>(lhs.slot),
-                 static_cast<std::int32_t>(rhs.slot));
+                  static_cast<std::int32_t>(rhs.slot),
+                  0,
+                  0,
+                  lhs.slotType,
+                  rhs.slotType);
 
             if (!lhs.constKey.empty()) {
                 consumeConstUse(lhs.constKey);
@@ -1597,6 +1648,7 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
                  OpCode::StoreLocalFromReg,
                  static_cast<std::int32_t>(tempSlot),
                  0);
+              lowered.slotType = SlotType::Local;
             lowered.slot = tempSlot;
             lowered.releasable = true;
             lowered.constKey.clear();
@@ -1615,6 +1667,7 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
              OpCode::StoreLocal,
              static_cast<std::int32_t>(tempSlot),
              0);
+           lowered.slotType = SlotType::Local;
         lowered.slot = tempSlot;
         lowered.releasable = true;
         lowered.constKey.clear();
@@ -2151,9 +2204,13 @@ void compileStatements(const std::vector<Stmt>& statements,
 
             const std::size_t loopStart = out.code.size();
               emit(out.code,
-                  OpCode::LessLocalLocal,
+                  OpCode::LessThan,
                   static_cast<std::int32_t>(iterSlot),
-                  static_cast<std::int32_t>(endSlot));
+                  static_cast<std::int32_t>(endSlot),
+                  0,
+                  0,
+                  SlotType::Local,
+                  SlotType::Local);
               const std::size_t exitJump = emitJumpIfFalseReg(out.code);
 
             LoopContext localLoop;
@@ -2170,9 +2227,13 @@ void compileStatements(const std::vector<Stmt>& statements,
 
             localLoop.continueTarget = out.code.size();
               emit(out.code,
-                  OpCode::AddLocalLocal,
+                  OpCode::Add,
                   static_cast<std::int32_t>(iterSlot),
-                  static_cast<std::int32_t>(oneSlot));
+                  static_cast<std::int32_t>(oneSlot),
+                  0,
+                  0,
+                  SlotType::Local,
+                  SlotType::Local);
               emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(iterSlot));
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
@@ -2210,9 +2271,13 @@ void compileStatements(const std::vector<Stmt>& statements,
             emitLocalValueToStack(out.code, indexSlot);
             emitLocalValueToStack(out.code, sizeSlot);
               emit(out.code,
-                  OpCode::LessLocalLocal,
+                  OpCode::LessThan,
                   static_cast<std::int32_t>(indexSlot),
-                  static_cast<std::int32_t>(sizeSlot));
+                  static_cast<std::int32_t>(sizeSlot),
+                  0,
+                  0,
+                  SlotType::Local,
+                  SlotType::Local);
               const std::size_t exitJump = emitJumpIfFalseReg(out.code);
 
             emitLocalValueToStack(out.code, listSlot);
@@ -2234,9 +2299,13 @@ void compileStatements(const std::vector<Stmt>& statements,
 
             localLoop.continueTarget = out.code.size();
               emit(out.code,
-                  OpCode::AddLocalLocal,
+                  OpCode::Add,
                   static_cast<std::int32_t>(indexSlot),
-                  static_cast<std::int32_t>(oneSlot));
+                  static_cast<std::int32_t>(oneSlot),
+                  0,
+                  0,
+                  SlotType::Local,
+                  SlotType::Local);
               emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(indexSlot));
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
@@ -2275,9 +2344,13 @@ void compileStatements(const std::vector<Stmt>& statements,
             emitLocalValueToStack(out.code, indexSlot);
             emitLocalValueToStack(out.code, sizeSlot);
               emit(out.code,
-                  OpCode::LessLocalLocal,
+                  OpCode::LessThan,
                   static_cast<std::int32_t>(indexSlot),
-                  static_cast<std::int32_t>(sizeSlot));
+                  static_cast<std::int32_t>(sizeSlot),
+                  0,
+                  0,
+                  SlotType::Local,
+                  SlotType::Local);
               const std::size_t exitJump = emitJumpIfFalseReg(out.code);
 
             emitLocalValueToStack(out.code, dictSlot);
@@ -2304,9 +2377,13 @@ void compileStatements(const std::vector<Stmt>& statements,
 
             localLoop.continueTarget = out.code.size();
               emit(out.code,
-                  OpCode::AddLocalLocal,
+                  OpCode::Add,
                   static_cast<std::int32_t>(indexSlot),
-                  static_cast<std::int32_t>(oneSlot));
+                  static_cast<std::int32_t>(oneSlot),
+                  0,
+                  0,
+                  SlotType::Local,
+                  SlotType::Local);
               emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(indexSlot));
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
@@ -2916,7 +2993,9 @@ std::string serializeModuleText(const Module& module) {
         out << fn.stackSlotCount << "\n";
         out << fn.code.size() << "\n";
         for (const auto& ins : fn.code) {
-            out << static_cast<int>(ins.op) << ' ' << ins.a << ' ' << ins.b << "\n";
+            out << static_cast<int>(ins.op) << ' '
+                << static_cast<int>(ins.aSlotType) << ' ' << ins.a << ' '
+                << static_cast<int>(ins.bSlotType) << ' ' << ins.b << "\n";
         }
     }
 
@@ -2993,9 +3072,17 @@ Module deserializeModuleText(const std::string& text) {
         fn.code.reserve(codeCount);
         for (std::size_t c = 0; c < codeCount; ++c) {
             int op = 0;
+            int aSlot = 0;
+            int bSlot = 0;
+            std::int32_t a = 0;
+            std::int32_t b = 0;
             Instruction ins;
-            in >> op >> ins.a >> ins.b;
+            in >> op >> aSlot >> a >> bSlot >> b;
             ins.op = static_cast<OpCode>(op);
+            ins.aSlotType = static_cast<SlotType>(aSlot);
+            ins.a = a;
+            ins.bSlotType = static_cast<SlotType>(bSlot);
+            ins.b = b;
             fn.code.push_back(ins);
         }
 
