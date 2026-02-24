@@ -40,6 +40,7 @@ set(GS_LIB_HEADERS
     include/gs/global.hpp
     include/gs/bytecode.hpp
     include/gs/compiler.hpp
+    include/gs/ir.hpp
     include/gs/parser.hpp
     include/gs/runtime.hpp
     include/gs/task_system.hpp

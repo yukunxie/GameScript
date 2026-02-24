@@ -8,6 +8,14 @@ from module_math import add, hello as gg;
 
 let TOP_LEVEL_SENTINEL = 314;
 
+fn test_load_const()
+{
+    let k = 2;
+    k = k + 2 + 2 - 3 * 4 / 9;
+    print ("test_load_const k =", k);
+    # assert(k == 5.555555555555555, "k expected 5.555555555555555, actual {}", k);
+}
+
 fn test_arithmetic_and_string() {
     let x = 40 + 2;
     assert(x == 42, "x expected 42, actual {}", x);
@@ -215,6 +223,8 @@ fn run_bench(verbose) {
         print("[bench] suite start");
         print("gg.hello", gg.hello(), TOP_LEVEL_SENTINEL);
     }
+
+    test_load_const();
 
     let passed = 0;
     passed = passed + test_arithmetic_and_string();

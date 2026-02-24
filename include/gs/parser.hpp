@@ -15,6 +15,7 @@ enum class ExprType {
     Number,
     StringLiteral,
     Variable,
+    Unary,
     Binary,
     ListLiteral,
     DictLiteral,
@@ -39,6 +40,7 @@ struct Expr {
     Value value{Value::Nil()};
     std::string name;
     std::string stringLiteral;
+    TokenType unaryOp{TokenType::Bang};
     TokenType binaryOp{TokenType::Plus};
     std::unique_ptr<Expr> left;
     std::unique_ptr<Expr> right;

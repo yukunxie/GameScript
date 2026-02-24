@@ -57,6 +57,8 @@ struct Frame {
     Value constructorInstance{Value::Nil()};
     std::vector<Value> locals;
     std::vector<Value> stack;
+    std::size_t stackTop{0};
+    Value registerValue{Value::Nil()};
 };
 
 struct ExecutionContext {

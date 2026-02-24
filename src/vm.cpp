@@ -17,24 +17,33 @@ namespace gs {
 
 namespace {
 
-Value popValue(std::vector<Value>& stack) {
-    if (stack.empty()) {
-        throw std::runtime_error("Stack underflow");
+void pushRaw(std::vector<Value>& stack, std::size_t& stackTop, const Value& value) {
+    if (stackTop >= stack.size()) {
+        const std::size_t nextSize = stack.empty() ? 8 : (stack.size() * 2);
+        stack.resize(nextSize, Value::Nil());
     }
-    const Value v = stack.back();
-    stack.pop_back();
-    return v;
+    stack[stackTop++] = value;
 }
 
-std::vector<Value> collectArgs(std::vector<Value>& stack, std::size_t count) {
-    if (stack.size() < count) {
+Value popRaw(std::vector<Value>& stack, std::size_t& stackTop) {
+    if (stackTop == 0) {
+        throw std::runtime_error("Stack underflow");
+    }
+    --stackTop;
+    return stack[stackTop];
+}
+
+void collectArgs(std::vector<Value>& stack,
+                 std::size_t& stackTop,
+                 std::size_t count,
+                 std::vector<Value>& outArgs) {
+    if (stackTop < count) {
         throw std::runtime_error("Not enough arguments on stack");
     }
-    std::vector<Value> args(count);
+    outArgs.resize(count);
     for (std::size_t i = 0; i < count; ++i) {
-        args[count - 1 - i] = popValue(stack);
+        outArgs[count - 1 - i] = popRaw(stack, stackTop);
     }
-    return args;
 }
 
 const std::string& getString(const ExecutionContext& context, const Value& value) {
@@ -164,11 +173,12 @@ void traceObjectChildren(ExecutionContext& context, std::uint64_t objectId, bool
 void markRoots(ExecutionContext& context, bool youngOnly) {
     for (const auto& frame : context.frames) {
         markValue(context, frame.constructorInstance, youngOnly);
+        markValue(context, frame.registerValue, youngOnly);
         for (const auto& value : frame.locals) {
             markValue(context, value, youngOnly);
         }
-        for (const auto& value : frame.stack) {
-            markValue(context, value, youngOnly);
+        for (std::size_t i = 0; i < frame.stackTop; ++i) {
+            markValue(context, frame.stack[i], youngOnly);
         }
     }
     markValue(context, context.returnValue, youngOnly);
@@ -818,6 +828,22 @@ Object& getObjectFromHeap(ExecutionContext& context, const Value& ref) {
     return *object;
 }
 
+void storeRuntimeGlobal(ExecutionContext& context,
+                        const std::shared_ptr<const Module>& frameModule,
+                        const std::string& symbolName,
+                        const Value& value) {
+    context.moduleRuntimeGlobals[frameModule.get()][symbolName] = value;
+
+    auto moduleRefIt = context.moduleRuntimeObjects.find(frameModule.get());
+    if (moduleRefIt != context.moduleRuntimeObjects.end() && moduleRefIt->second.isRef()) {
+        Object& moduleObjectBase = getObjectFromHeap(context, moduleRefIt->second);
+        if (auto* moduleObject = dynamic_cast<ModuleObject*>(&moduleObjectBase)) {
+            rememberWriteBarrier(context, *moduleObject, value);
+            moduleObject->exports()[symbolName] = value;
+        }
+    }
+}
+
 void initializeInstanceAttributes(const Module& module,
                                   ExecutionContext& context,
                                   FunctionType& functionType,
@@ -1010,6 +1036,9 @@ void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
     frame.replaceReturnWithInstance = replaceReturnWithInstance;
     frame.constructorInstance = constructorInstance;
     frame.locals.assign(fn.localCount, Value::Nil());
+    frame.stack.assign(fn.stackSlotCount, Value::Nil());
+    frame.stackTop = 0;
+    frame.registerValue = Value::Nil();
     for (std::size_t i = 0; i < args.size(); ++i) {
         frame.locals[i] = args[i];
     }
@@ -1032,6 +1061,7 @@ Object& VirtualMachine::getObject(ExecutionContext& context, const Value& ref) {
 
 bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) {
     std::size_t steps = 0;
+    std::vector<Value> argScratch;
     while (steps++ < stepBudget) {
         if (context.frames.empty()) {
             return true;
@@ -1060,12 +1090,24 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                 frameModule,
                                                 frameModule->constants.at(ins.a),
                                                 true);
-            frame.stack.push_back(value);
+            pushRaw(frame.stack, frame.stackTop, value);
             break;
         }
         case OpCode::LoadName: {
             const auto& symbolName = frameModule->strings.at(ins.a);
-            frame.stack.push_back(resolveRuntimeName(context,
+            pushRaw(frame.stack, frame.stackTop, resolveRuntimeName(context,
+                                                     functionType_,
+                                                     classType_,
+                                                     nativeFunctionType_,
+                                                     moduleType_,
+                                                     hosts_,
+                                                     frameModule,
+                                                     symbolName));
+            break;
+        }
+        case OpCode::PushName: {
+            const auto& symbolName = frameModule->strings.at(ins.a);
+            pushRaw(frame.stack, frame.stackTop, resolveRuntimeName(context,
                                                      functionType_,
                                                      classType_,
                                                      nativeFunctionType_,
@@ -1076,7 +1118,18 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::LoadLocal:
-            frame.stack.push_back(normalizeRuntimeValue(context,
+            pushRaw(frame.stack, frame.stackTop, normalizeRuntimeValue(context,
+                                                        functionType_,
+                                                        classType_,
+                                                        nativeFunctionType_,
+                                                        moduleType_,
+                                                        hosts_,
+                                                        frameModule,
+                                                        frame.locals.at(ins.a),
+                                                        false));
+            break;
+        case OpCode::PushLocal:
+            pushRaw(frame.stack, frame.stackTop, normalizeRuntimeValue(context,
                                                         functionType_,
                                                         classType_,
                                                         nativeFunctionType_,
@@ -1087,64 +1140,71 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                         false));
             break;
         case OpCode::StoreLocal: {
-            const Value v = popValue(frame.stack);
+            const Value v = popRaw(frame.stack, frame.stackTop);
             frame.locals.at(ins.a) = v;
             break;
         }
         case OpCode::StoreName: {
-            const Value value = popValue(frame.stack);
+            const Value value = popRaw(frame.stack, frame.stackTop);
             const auto& symbolName = frameModule->strings.at(ins.a);
-            context.moduleRuntimeGlobals[frameModule.get()][symbolName] = value;
-
-            auto moduleRefIt = context.moduleRuntimeObjects.find(frameModule.get());
-            if (moduleRefIt != context.moduleRuntimeObjects.end() && moduleRefIt->second.isRef()) {
-                Object& moduleObjectBase = getObject(context, moduleRefIt->second);
-                if (auto* moduleObject = dynamic_cast<ModuleObject*>(&moduleObjectBase)) {
-                    rememberWriteBarrier(context, *moduleObject, value);
-                    moduleObject->exports()[symbolName] = value;
-                }
-            }
+            storeRuntimeGlobal(context, frameModule, symbolName, value);
             break;
         }
         case OpCode::Add: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (lhs.isInt() && rhs.isInt()) {
-                frame.stack.push_back(Value::Int(lhs.asInt() + rhs.asInt()));
+                frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() + rhs.asInt());
             } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
-                frame.stack.push_back(Value::Float(toDouble(lhs) + toDouble(rhs)));
+                frame.stack[frame.stackTop - 1] = Value::Float(toDouble(lhs) + toDouble(rhs));
             } else {
-                frame.stack.push_back(makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs)));
+                frame.stack[frame.stackTop - 1] = makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs));
             }
             break;
         }
         case OpCode::Sub: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (lhs.isInt() && rhs.isInt()) {
-                frame.stack.push_back(Value::Int(lhs.asInt() - rhs.asInt()));
+                frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() - rhs.asInt());
             } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
-                frame.stack.push_back(Value::Float(toDouble(lhs) - toDouble(rhs)));
+                frame.stack[frame.stackTop - 1] = Value::Float(toDouble(lhs) - toDouble(rhs));
             } else {
                 throw std::runtime_error("Sub expects numeric operands");
             }
             break;
         }
         case OpCode::Mul: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (lhs.isInt() && rhs.isInt()) {
-                frame.stack.push_back(Value::Int(lhs.asInt() * rhs.asInt()));
+                frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() * rhs.asInt());
             } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
-                frame.stack.push_back(Value::Float(toDouble(lhs) * toDouble(rhs)));
+                frame.stack[frame.stackTop - 1] = Value::Float(toDouble(lhs) * toDouble(rhs));
             } else {
                 throw std::runtime_error("Mul expects numeric operands");
             }
             break;
         }
         case OpCode::Div: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
                 throw std::runtime_error("Div expects numeric operands");
             }
@@ -1152,85 +1212,165 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
                 throw std::runtime_error("Division by zero");
             }
-            frame.stack.push_back(Value::Float(toDouble(lhs) / divisor));
+            frame.stack[frame.stackTop - 1] = Value::Float(toDouble(lhs) / divisor);
             break;
         }
         case OpCode::LessThan: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
                 throw std::runtime_error("LessThan expects numeric operands");
             }
-            frame.stack.push_back(Value::Int(toDouble(lhs) < toDouble(rhs) ? 1 : 0));
+            frame.stack[frame.stackTop - 1] = Value::Int(toDouble(lhs) < toDouble(rhs) ? 1 : 0);
             break;
         }
         case OpCode::GreaterThan: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
                 throw std::runtime_error("GreaterThan expects numeric operands");
             }
-            frame.stack.push_back(Value::Int(toDouble(lhs) > toDouble(rhs) ? 1 : 0));
+            frame.stack[frame.stackTop - 1] = Value::Int(toDouble(lhs) > toDouble(rhs) ? 1 : 0);
             break;
         }
         case OpCode::Equal: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(valueEquals(context, lhs, rhs) ? 1 : 0));
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            frame.stack[frame.stackTop - 1] = Value::Int(valueEquals(context, lhs, rhs) ? 1 : 0);
             break;
         }
         case OpCode::NotEqual: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
-            frame.stack.push_back(Value::Int(valueEquals(context, lhs, rhs) ? 0 : 1));
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            frame.stack[frame.stackTop - 1] = Value::Int(valueEquals(context, lhs, rhs) ? 0 : 1);
             break;
         }
         case OpCode::LessEqual: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
                 throw std::runtime_error("LessEqual expects numeric operands");
             }
-            frame.stack.push_back(Value::Int(toDouble(lhs) <= toDouble(rhs) ? 1 : 0));
+            frame.stack[frame.stackTop - 1] = Value::Int(toDouble(lhs) <= toDouble(rhs) ? 1 : 0);
             break;
         }
         case OpCode::GreaterEqual: {
-            const Value rhs = popValue(frame.stack);
-            const Value lhs = popValue(frame.stack);
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
             if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
                 throw std::runtime_error("GreaterEqual expects numeric operands");
             }
-            frame.stack.push_back(Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0));
+            frame.stack[frame.stackTop - 1] = Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0);
+            break;
+        }
+        case OpCode::Negate: {
+            if (frame.stackTop == 0) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value operand = frame.stack[frame.stackTop - 1];
+            if (operand.isInt()) {
+                frame.stack[frame.stackTop - 1] = Value::Int(-operand.asInt());
+            } else if (operand.isFloat()) {
+                frame.stack[frame.stackTop - 1] = Value::Float(-operand.asFloat());
+            } else {
+                throw std::runtime_error("Negate expects numeric operand");
+            }
+            break;
+        }
+        case OpCode::Not: {
+            if (frame.stackTop == 0) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value operand = frame.stack[frame.stackTop - 1];
+            frame.stack[frame.stackTop - 1] = Value::Int(toBoolInt(operand) == 0 ? 1 : 0);
             break;
         }
         case OpCode::Jump:
             frame.ip = static_cast<std::size_t>(ins.a);
             break;
         case OpCode::JumpIfFalse: {
-            const Value cond = popValue(frame.stack);
+            if (frame.stackTop == 0) {
+                throw std::runtime_error("Stack underflow");
+            }
+            --frame.stackTop;
+            const Value cond = frame.stack[frame.stackTop];
             if (toBoolInt(cond) == 0) {
                 frame.ip = static_cast<std::size_t>(ins.a);
             }
             break;
         }
+        case OpCode::JumpIfFalseReg: {
+            const Value cond = normalizeRuntimeValue(context,
+                                                     functionType_,
+                                                     classType_,
+                                                     nativeFunctionType_,
+                                                     moduleType_,
+                                                     hosts_,
+                                                     frameModule,
+                                                     frame.registerValue,
+                                                     false);
+            if (toBoolInt(cond) == 0) {
+                frame.ip = static_cast<std::size_t>(ins.a);
+            }
+            break;
+        }
+        case OpCode::JumpIfFalseLocal: {
+            const Value cond = normalizeRuntimeValue(context,
+                                                     functionType_,
+                                                     classType_,
+                                                     nativeFunctionType_,
+                                                     moduleType_,
+                                                     hosts_,
+                                                     frameModule,
+                                                     frame.locals.at(ins.a),
+                                                     false);
+            if (toBoolInt(cond) == 0) {
+                frame.ip = static_cast<std::size_t>(ins.b);
+            }
+            break;
+        }
         case OpCode::CallHost: {
-            const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
+            collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
             const auto& name = frameModule->strings.at(ins.a);
             const std::size_t callerFrameIndex = context.frames.size() - 1;
             VmHostContext hostContext(*this, context);
-            const Value result = hosts_.invoke(name, hostContext, args);
+            const Value result = hosts_.invoke(name, hostContext, argScratch);
             if (callerFrameIndex < context.frames.size()) {
-                context.frames[callerFrameIndex].stack.push_back(result);
+                pushRaw(context.frames[callerFrameIndex].stack, context.frames[callerFrameIndex].stackTop, result);
             }
             break;
         }
         case OpCode::CallFunc: {
-            const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
-            pushCallFrame(context, frameModule, static_cast<std::size_t>(ins.a), args);
+            collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
+            pushCallFrame(context, frameModule, static_cast<std::size_t>(ins.a), argScratch);
             break;
         }
         case OpCode::NewInstance: {
-            const auto ctorArgs = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
+            collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
             const std::size_t classIndex = static_cast<std::size_t>(ins.a);
             const Value instanceRef = makeScriptInstance(context,
                                                          functionType_,
@@ -1249,9 +1389,9 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             }
 
             std::vector<Value> ctorInvokeArgs;
-            ctorInvokeArgs.reserve(ctorArgs.size() + 1);
+            ctorInvokeArgs.reserve(argScratch.size() + 1);
             ctorInvokeArgs.push_back(instanceRef);
-            ctorInvokeArgs.insert(ctorInvokeArgs.end(), ctorArgs.begin(), ctorArgs.end());
+            ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
             pushCallFrame(context,
                           frameModule,
                           ctorFunctionIndex,
@@ -1261,7 +1401,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         }
         case OpCode::LoadAttr: {
-            const Value selfRef = popValue(frame.stack);
+            const Value selfRef = popRaw(frame.stack, frame.stackTop);
             Object& object = getObject(context, selfRef);
             const auto& attrName = frameModule->strings.at(ins.a);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
@@ -1279,11 +1419,11 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                    valueModule,
                                                    it->second,
                                                    false);
-                frame.stack.push_back(it->second);
+                pushRaw(frame.stack, frame.stackTop, it->second);
             } else if (auto* moduleObj = dynamic_cast<ModuleObject*>(&object)) {
                 auto exportIt = moduleObj->exports().find(attrName);
                 if (exportIt != moduleObj->exports().end()) {
-                    frame.stack.push_back(exportIt->second);
+                    pushRaw(frame.stack, frame.stackTop, exportIt->second);
                     break;
                 }
 
@@ -1302,7 +1442,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                                       true);
                             rememberWriteBarrier(context, *moduleObj, globalValue);
                             moduleObj->exports()[attrName] = globalValue;
-                            frame.stack.push_back(globalValue);
+                            pushRaw(frame.stack, frame.stackTop, globalValue);
                             goto load_attr_done;
                         }
                     }
@@ -1313,7 +1453,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                             Value functionRef = makeFunctionObject(context, functionType_, i, modulePin);
                             rememberWriteBarrier(context, *moduleObj, functionRef);
                             moduleObj->exports()[attrName] = functionRef;
-                            frame.stack.push_back(functionRef);
+                            pushRaw(frame.stack, frame.stackTop, functionRef);
                             goto load_attr_done;
                         }
                     }
@@ -1328,22 +1468,22 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                                                          modulePin));
                             rememberWriteBarrier(context, *moduleObj, classRef);
                             moduleObj->exports()[attrName] = classRef;
-                            frame.stack.push_back(classRef);
+                            pushRaw(frame.stack, frame.stackTop, classRef);
                             goto load_attr_done;
                         }
                     }
                 }
 
-                frame.stack.push_back(object.getType().getMember(object, attrName));
+                pushRaw(frame.stack, frame.stackTop, object.getType().getMember(object, attrName));
             } else {
-                frame.stack.push_back(object.getType().getMember(object, attrName));
+                pushRaw(frame.stack, frame.stackTop, object.getType().getMember(object, attrName));
             }
 load_attr_done:
             break;
         }
         case OpCode::StoreAttr: {
-            const Value assigned = popValue(frame.stack);
-            const Value selfRef = popValue(frame.stack);
+            const Value assigned = popRaw(frame.stack, frame.stackTop);
+            const Value selfRef = popRaw(frame.stack, frame.stackTop);
             Object& object = getObject(context, selfRef);
             const auto& attrName = frameModule->strings.at(ins.a);
             const Value normalized = normalizeRuntimeValue(context,
@@ -1358,16 +1498,16 @@ load_attr_done:
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 rememberWriteBarrier(context, *instance, normalized);
                 instance->fields()[attrName] = normalized;
-                frame.stack.push_back(normalized);
+                pushRaw(frame.stack, frame.stackTop, normalized);
             } else {
                 rememberWriteBarrier(context, object, normalized);
-                frame.stack.push_back(object.getType().setMember(object, attrName, normalized));
+                pushRaw(frame.stack, frame.stackTop, object.getType().setMember(object, attrName, normalized));
             }
             break;
         }
         case OpCode::CallMethod: {
-            const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
-            const Value selfRef = popValue(frame.stack);
+            collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
+            const Value selfRef = popRaw(frame.stack, frame.stackTop);
             Object& object = getObject(context, selfRef);
             const auto& methodName = frameModule->strings.at(ins.a);
 
@@ -1409,7 +1549,7 @@ load_attr_done:
                         pushCallFrame(context,
                                       callModule,
                                       fnObject->functionIndex(),
-                                      args);
+                                      argScratch);
                         goto call_method_done;
                     }
 
@@ -1438,9 +1578,9 @@ load_attr_done:
                         }
 
                         std::vector<Value> ctorInvokeArgs;
-                        ctorInvokeArgs.reserve(args.size() + 1);
+                        ctorInvokeArgs.reserve(argScratch.size() + 1);
                         ctorInvokeArgs.push_back(instanceRef);
-                        ctorInvokeArgs.insert(ctorInvokeArgs.end(), args.begin(), args.end());
+                        ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
                         pushCallFrame(context,
                                       targetModule,
                                       ctorFunctionIndex,
@@ -1453,9 +1593,9 @@ load_attr_done:
                     if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
                         const std::size_t callerFrameIndex = context.frames.size() - 1;
                         VmHostContext hostContext(*this, context);
-                        const Value result = nativeFunction->invoke(hostContext, args);
+                        const Value result = nativeFunction->invoke(hostContext, argScratch);
                         if (callerFrameIndex < context.frames.size()) {
-                            context.frames[callerFrameIndex].stack.push_back(result);
+                            pushRaw(context.frames[callerFrameIndex].stack, context.frames[callerFrameIndex].stackTop, result);
                         }
                         goto call_method_done;
                     }
@@ -1473,7 +1613,7 @@ load_attr_done:
                         pushCallFrame(context,
                                       modulePin,
                                       i,
-                                      args);
+                                      argScratch);
                         goto call_method_done;
                     }
                 }
@@ -1500,9 +1640,9 @@ load_attr_done:
                     }
 
                     std::vector<Value> ctorInvokeArgs;
-                    ctorInvokeArgs.reserve(args.size() + 1);
+                    ctorInvokeArgs.reserve(argScratch.size() + 1);
                     ctorInvokeArgs.push_back(instanceRef);
-                    ctorInvokeArgs.insert(ctorInvokeArgs.end(), args.begin(), args.end());
+                    ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
                     pushCallFrame(context,
                                   modulePin,
                                   ctorFunctionIndex,
@@ -1516,14 +1656,14 @@ load_attr_done:
             }
 
             if (auto* list = dynamic_cast<ListObject*>(&object)) {
-                if (methodName == "push" && !args.empty()) {
-                    rememberWriteBarrier(context, *list, args[0]);
-                } else if (methodName == "set" && args.size() >= 2) {
-                    rememberWriteBarrier(context, *list, args[1]);
+                if (methodName == "push" && !argScratch.empty()) {
+                    rememberWriteBarrier(context, *list, argScratch[0]);
+                } else if (methodName == "set" && argScratch.size() >= 2) {
+                    rememberWriteBarrier(context, *list, argScratch[1]);
                 }
             } else if (auto* dict = dynamic_cast<DictObject*>(&object)) {
-                if (methodName == "set" && args.size() >= 2) {
-                    rememberWriteBarrier(context, *dict, args[1]);
+                if (methodName == "set" && argScratch.size() >= 2) {
+                    rememberWriteBarrier(context, *dict, argScratch[1]);
                 }
             }
 
@@ -1556,7 +1696,7 @@ load_attr_done:
                     pushCallFrame(context,
                                   callModule,
                                   fnObject->functionIndex(),
-                                  args);
+                                  argScratch);
                     break;
                 }
 
@@ -1564,9 +1704,9 @@ load_attr_done:
                 auto methodModule = instance->modulePin() ? instance->modulePin() : frameModule;
                 if (tryFindClassMethodInModule(*methodModule, instance->classIndex(), methodName, classMethodIndex)) {
                     std::vector<Value> methodArgs;
-                    methodArgs.reserve(args.size() + 1);
+                    methodArgs.reserve(argScratch.size() + 1);
                     methodArgs.push_back(selfRef);
-                    methodArgs.insert(methodArgs.end(), args.begin(), args.end());
+                    methodArgs.insert(methodArgs.end(), argScratch.begin(), argScratch.end());
                     pushCallFrame(context,
                                   methodModule,
                                   classMethodIndex,
@@ -1574,15 +1714,15 @@ load_attr_done:
                     break;
                 }
 
-                frame.stack.push_back(object.getType().callMethod(object,
+                pushRaw(frame.stack, frame.stackTop, object.getType().callMethod(object,
                                                                   methodName,
-                                                                  args,
+                                                                  argScratch,
                                                                   makeString,
                                                                   valueStr));
             } else {
-                frame.stack.push_back(object.getType().callMethod(object,
+                pushRaw(frame.stack, frame.stackTop, object.getType().callMethod(object,
                                                                   methodName,
-                                                                  args,
+                                                                  argScratch,
                                                                   makeString,
                                                                   valueStr));
             }
@@ -1590,8 +1730,8 @@ call_method_done:
             break;
         }
         case OpCode::CallValue: {
-            const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.a));
-            Value callable = popValue(frame.stack);
+            collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.a), argScratch);
+            Value callable = popRaw(frame.stack, frame.stackTop);
             callable = normalizeRuntimeValue(context,
                                              functionType_,
                                              classType_,
@@ -1612,7 +1752,7 @@ call_method_done:
                 pushCallFrame(context,
                               callModule,
                               fnObject->functionIndex(),
-                              args);
+                              argScratch);
                 break;
             }
 
@@ -1641,9 +1781,9 @@ call_method_done:
                 }
 
                 std::vector<Value> ctorInvokeArgs;
-                ctorInvokeArgs.reserve(args.size() + 1);
+                ctorInvokeArgs.reserve(argScratch.size() + 1);
                 ctorInvokeArgs.push_back(instanceRef);
-                ctorInvokeArgs.insert(ctorInvokeArgs.end(), args.begin(), args.end());
+                ctorInvokeArgs.insert(ctorInvokeArgs.end(), argScratch.begin(), argScratch.end());
                 pushCallFrame(context,
                               targetModule,
                               ctorFunctionIndex,
@@ -1656,9 +1796,9 @@ call_method_done:
             if (auto* nativeFunction = dynamic_cast<NativeFunctionObject*>(&callableObject)) {
                 const std::size_t callerFrameIndex = context.frames.size() - 1;
                 VmHostContext hostContext(*this, context);
-                const Value result = nativeFunction->invoke(hostContext, args);
+                const Value result = nativeFunction->invoke(hostContext, argScratch);
                 if (callerFrameIndex < context.frames.size()) {
-                    context.frames[callerFrameIndex].stack.push_back(result);
+                    pushRaw(context.frames[callerFrameIndex].stack, context.frames[callerFrameIndex].stackTop, result);
                 }
                 break;
             }
@@ -1668,41 +1808,42 @@ call_method_done:
         case OpCode::CallIntrinsic:
             throw std::runtime_error("CallIntrinsic is deprecated. Use Type exported methods.");
         case OpCode::SpawnFunc: {
-            const auto args = collectArgs(frame.stack, static_cast<std::size_t>(ins.b));
+            collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
             const auto funcName = frameModule->functions.at(ins.a).name;
             const auto module = frameModule;
             const auto* hosts = &hosts_;
             auto& tasks = tasks_;
-            const std::int64_t handle = tasks_.enqueue([module, hosts, &tasks, funcName, args]() {
+            const std::vector<Value> asyncArgs = argScratch;
+            const std::int64_t handle = tasks_.enqueue([module, hosts, &tasks, funcName, asyncArgs]() {
                 VirtualMachine vm(module, *hosts, tasks);
-                return vm.runFunction(funcName, args);
+                return vm.runFunction(funcName, asyncArgs);
             });
-            frame.stack.push_back(Value::Int(handle));
+            pushRaw(frame.stack, frame.stackTop, Value::Int(handle));
             break;
         }
         case OpCode::Await: {
-            const auto handle = popValue(frame.stack).asInt();
-            frame.stack.push_back(tasks_.await(handle));
+            const auto handle = popRaw(frame.stack, frame.stackTop).asInt();
+            pushRaw(frame.stack, frame.stackTop, tasks_.await(handle));
             break;
         }
         case OpCode::MakeList: {
             const std::size_t count = static_cast<std::size_t>(ins.a);
-            const auto elements = collectArgs(frame.stack, count);
-            frame.stack.push_back(emplaceObject(context, std::make_unique<ListObject>(listType_, elements)));
+            collectArgs(frame.stack, frame.stackTop, count, argScratch);
+            pushRaw(frame.stack, frame.stackTop, emplaceObject(context, std::make_unique<ListObject>(listType_, argScratch)));
             break;
         }
         case OpCode::MakeDict: {
             const std::size_t pairCount = static_cast<std::size_t>(ins.a);
-            if (frame.stack.size() < pairCount * 2) {
+            if (frame.stackTop < pairCount * 2) {
                 throw std::runtime_error("Not enough stack values for dict literal");
             }
             std::unordered_map<std::int64_t, Value> values;
             for (std::size_t i = 0; i < pairCount; ++i) {
-                const Value value = popValue(frame.stack);
-                const Value key = popValue(frame.stack);
+                const Value value = popRaw(frame.stack, frame.stackTop);
+                const Value key = popRaw(frame.stack, frame.stackTop);
                 values[key.asInt()] = value;
             }
-            frame.stack.push_back(emplaceObject(context, std::make_unique<DictObject>(dictType_, std::move(values))));
+            pushRaw(frame.stack, frame.stackTop, emplaceObject(context, std::make_unique<DictObject>(dictType_, std::move(values))));
             break;
         }
         case OpCode::Sleep:
@@ -1712,7 +1853,11 @@ call_method_done:
             std::this_thread::yield();
             break;
         case OpCode::Return: {
-            Value ret = frame.stack.empty() ? Value::Nil() : popValue(frame.stack);
+            Value ret = Value::Nil();
+            if (frame.stackTop > 0) {
+                --frame.stackTop;
+                ret = frame.stack[frame.stackTop];
+            }
             if (frame.replaceReturnWithInstance) {
                 ret = frame.constructorInstance;
             }
@@ -1721,12 +1866,199 @@ call_method_done:
                 context.returnValue = ret;
                 return true;
             }
-            context.frames.back().stack.push_back(ret);
+            pushRaw(context.frames.back().stack, context.frames.back().stackTop, ret);
             break;
         }
         case OpCode::Pop:
-            (void)popValue(frame.stack);
+            if (frame.stackTop == 0) {
+                throw std::runtime_error("Stack underflow");
+            }
+            --frame.stackTop;
             break;
+        case OpCode::MoveLocalToReg:
+            frame.registerValue = normalizeRuntimeValue(context,
+                                                        functionType_,
+                                                        classType_,
+                                                        nativeFunctionType_,
+                                                        moduleType_,
+                                                        hosts_,
+                                                        frameModule,
+                                                        frame.locals.at(ins.a),
+                                                        false);
+            break;
+        case OpCode::MoveNameToReg: {
+            const auto& symbolName = frameModule->strings.at(ins.a);
+            frame.registerValue = resolveRuntimeName(context,
+                                                     functionType_,
+                                                     classType_,
+                                                     nativeFunctionType_,
+                                                     moduleType_,
+                                                     hosts_,
+                                                     frameModule,
+                                                     symbolName);
+            break;
+        }
+        case OpCode::ConstToReg:
+            frame.registerValue = normalizeRuntimeValue(context,
+                                                        functionType_,
+                                                        classType_,
+                                                        nativeFunctionType_,
+                                                        moduleType_,
+                                                        hosts_,
+                                                        frameModule,
+                                                        frameModule->constants.at(ins.a),
+                                                        true);
+            break;
+        case OpCode::LoadConst:
+            frame.locals.at(ins.b) = normalizeRuntimeValue(context,
+                                                           functionType_,
+                                                           classType_,
+                                                           nativeFunctionType_,
+                                                           moduleType_,
+                                                           hosts_,
+                                                           frameModule,
+                                                           frameModule->constants.at(ins.a),
+                                                           true);
+            break;
+        case OpCode::PushReg:
+            pushRaw(frame.stack, frame.stackTop, frame.registerValue);
+            break;
+        case OpCode::StoreLocalFromReg:
+            frame.locals.at(ins.a) = frame.registerValue;
+            break;
+        case OpCode::StoreNameFromReg: {
+            const auto& symbolName = frameModule->strings.at(ins.a);
+            storeRuntimeGlobal(context, frameModule, symbolName, frame.registerValue);
+            break;
+        }
+        case OpCode::AddLocalLocal:
+        case OpCode::SubLocalLocal:
+        case OpCode::MulLocalLocal:
+        case OpCode::DivLocalLocal:
+        case OpCode::LessLocalLocal:
+        case OpCode::GreaterLocalLocal:
+        case OpCode::EqualLocalLocal:
+        case OpCode::NotEqualLocalLocal:
+        case OpCode::LessEqualLocalLocal:
+        case OpCode::GreaterEqualLocalLocal:
+        case OpCode::NegLocal:
+        case OpCode::NotLocal: {
+            if (ins.op == OpCode::NegLocal || ins.op == OpCode::NotLocal) {
+                const Value operand = normalizeRuntimeValue(context,
+                                                            functionType_,
+                                                            classType_,
+                                                            nativeFunctionType_,
+                                                            moduleType_,
+                                                            hosts_,
+                                                            frameModule,
+                                                            frame.locals.at(ins.a),
+                                                            false);
+                if (ins.op == OpCode::NegLocal) {
+                    if (operand.isInt()) {
+                        frame.registerValue = Value::Int(-operand.asInt());
+                    } else if (operand.isFloat()) {
+                        frame.registerValue = Value::Float(-operand.asFloat());
+                    } else {
+                        throw std::runtime_error("Negate expects numeric operand");
+                    }
+                } else {
+                    frame.registerValue = Value::Int(toBoolInt(operand) == 0 ? 1 : 0);
+                }
+                break;
+            }
+
+            const Value lhs = normalizeRuntimeValue(context,
+                                                    functionType_,
+                                                    classType_,
+                                                    nativeFunctionType_,
+                                                    moduleType_,
+                                                    hosts_,
+                                                    frameModule,
+                                                    frame.locals.at(ins.a),
+                                                    false);
+            const Value rhs = normalizeRuntimeValue(context,
+                                                    functionType_,
+                                                    classType_,
+                                                    nativeFunctionType_,
+                                                    moduleType_,
+                                                    hosts_,
+                                                    frameModule,
+                                                    frame.locals.at(ins.b),
+                                                    false);
+            switch (ins.op) {
+            case OpCode::AddLocalLocal:
+                if (lhs.isInt() && rhs.isInt()) {
+                    frame.registerValue = Value::Int(lhs.asInt() + rhs.asInt());
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    frame.registerValue = Value::Float(toDouble(lhs) + toDouble(rhs));
+                } else {
+                    frame.registerValue = makeRuntimeString(context, __str__Value(context, lhs) + __str__Value(context, rhs));
+                }
+                break;
+            case OpCode::SubLocalLocal:
+                if (lhs.isInt() && rhs.isInt()) {
+                    frame.registerValue = Value::Int(lhs.asInt() - rhs.asInt());
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    frame.registerValue = Value::Float(toDouble(lhs) - toDouble(rhs));
+                } else {
+                    throw std::runtime_error("Sub expects numeric operands");
+                }
+                break;
+            case OpCode::MulLocalLocal:
+                if (lhs.isInt() && rhs.isInt()) {
+                    frame.registerValue = Value::Int(lhs.asInt() * rhs.asInt());
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    frame.registerValue = Value::Float(toDouble(lhs) * toDouble(rhs));
+                } else {
+                    throw std::runtime_error("Mul expects numeric operands");
+                }
+                break;
+            case OpCode::DivLocalLocal: {
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("Div expects numeric operands");
+                }
+                const double divisor = toDouble(rhs);
+                if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                    throw std::runtime_error("Division by zero");
+                }
+                frame.registerValue = Value::Float(toDouble(lhs) / divisor);
+                break;
+            }
+            case OpCode::LessLocalLocal:
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("LessThan expects numeric operands");
+                }
+                frame.registerValue = Value::Int(toDouble(lhs) < toDouble(rhs) ? 1 : 0);
+                break;
+            case OpCode::GreaterLocalLocal:
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("GreaterThan expects numeric operands");
+                }
+                frame.registerValue = Value::Int(toDouble(lhs) > toDouble(rhs) ? 1 : 0);
+                break;
+            case OpCode::EqualLocalLocal:
+                frame.registerValue = Value::Int(valueEquals(context, lhs, rhs) ? 1 : 0);
+                break;
+            case OpCode::NotEqualLocalLocal:
+                frame.registerValue = Value::Int(valueEquals(context, lhs, rhs) ? 0 : 1);
+                break;
+            case OpCode::LessEqualLocalLocal:
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("LessEqual expects numeric operands");
+                }
+                frame.registerValue = Value::Int(toDouble(lhs) <= toDouble(rhs) ? 1 : 0);
+                break;
+            case OpCode::GreaterEqualLocalLocal:
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("GreaterEqual expects numeric operands");
+                }
+                frame.registerValue = Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0);
+                break;
+            default:
+                break;
+            }
+            break;
+        }
         }
 
         runGcSlice(context, context.gc.sliceBudgetObjects);
@@ -1802,3 +2134,5 @@ void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
 }
 
 } // namespace gs
+
+

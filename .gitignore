@@ -27,3 +27,8 @@ Thumbs.db
 *.gsb
 *.gsbc
 *.gst
+
+# Compiler debug disassembly outputs
+**/.gsdebug/
+*.ir.dis
+*.opcode.dis

@@ -547,21 +547,17 @@ Expr Parser::parseFactor() {
 }
 
 Expr Parser::parseUnary() {
-    if (match(TokenType::Minus)) {
-        Expr zero;
-        zero.type = ExprType::Number;
-        zero.value = Value::Int(0);
-
+    if (match(TokenType::Minus) || match(TokenType::Bang)) {
+        const Token op = previous();
         Expr rhs = parseUnary();
 
-        Expr merged;
-        merged.type = ExprType::Binary;
-        merged.line = rhs.line;
-        merged.column = rhs.column;
-        merged.binaryOp = TokenType::Minus;
-        merged.left = std::make_unique<Expr>(std::move(zero));
-        merged.right = std::make_unique<Expr>(std::move(rhs));
-        return merged;
+        Expr unary;
+        unary.type = ExprType::Unary;
+        unary.line = op.line;
+        unary.column = op.column;
+        unary.unaryOp = op.type;
+        unary.right = std::make_unique<Expr>(std::move(rhs));
+        return unary;
     }
 
     return parsePrimary();

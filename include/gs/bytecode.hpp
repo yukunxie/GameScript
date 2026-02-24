@@ -185,8 +185,12 @@ enum class OpCode : std::uint8_t {
     NotEqual,
     LessEqual,
     GreaterEqual,
+    Negate,
+    Not,
     Jump,
     JumpIfFalse,
+    JumpIfFalseReg,
+    JumpIfFalseLocal,
     CallHost,
     CallFunc,
     NewInstance,
@@ -202,7 +206,28 @@ enum class OpCode : std::uint8_t {
     Sleep,
     Yield,
     Return,
-    Pop
+    Pop,
+    MoveLocalToReg,
+    MoveNameToReg,
+    ConstToReg,
+    LoadConst,
+    PushReg,
+    StoreLocalFromReg,
+    StoreNameFromReg,
+    AddLocalLocal,
+    SubLocalLocal,
+    MulLocalLocal,
+    DivLocalLocal,
+    LessLocalLocal,
+    GreaterLocalLocal,
+    EqualLocalLocal,
+    NotEqualLocalLocal,
+    LessEqualLocalLocal,
+    GreaterEqualLocalLocal,
+    NegLocal,
+    NotLocal,
+    PushLocal,
+    PushName
 };
 
 struct Instruction {
@@ -216,6 +241,7 @@ struct FunctionBytecode {
     std::vector<std::string> params;
     std::vector<Instruction> code;
     std::size_t localCount{0};
+    std::size_t stackSlotCount{0};
 };
 
 struct ClassMethodBinding {

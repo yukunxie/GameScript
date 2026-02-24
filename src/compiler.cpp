@@ -6,6 +6,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <regex>
 #include <sstream>
@@ -35,6 +36,336 @@ std::string readFileText(const std::string& path) {
         return {};
     }
     return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+}
+
+bool defaultCompileDisassemblyDumpEnabled() {
+#ifndef NDEBUG
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool g_compileDisassemblyDumpEnabled = defaultCompileDisassemblyDumpEnabled();
+
+const char* opcodeName(OpCode op) {
+    switch (op) {
+    case OpCode::PushConst: return "PushConst";
+    case OpCode::LoadLocal: return "LoadLocal";
+    case OpCode::LoadName: return "LoadName";
+    case OpCode::StoreName: return "StoreName";
+    case OpCode::StoreLocal: return "StoreLocal";
+    case OpCode::Add: return "Add";
+    case OpCode::Sub: return "Sub";
+    case OpCode::Mul: return "Mul";
+    case OpCode::Div: return "Div";
+    case OpCode::LessThan: return "LessThan";
+    case OpCode::GreaterThan: return "GreaterThan";
+    case OpCode::Equal: return "Equal";
+    case OpCode::NotEqual: return "NotEqual";
+    case OpCode::LessEqual: return "LessEqual";
+    case OpCode::GreaterEqual: return "GreaterEqual";
+    case OpCode::Negate: return "Negate";
+    case OpCode::Not: return "Not";
+    case OpCode::Jump: return "Jump";
+    case OpCode::JumpIfFalse: return "JumpIfFalse";
+    case OpCode::JumpIfFalseReg: return "JumpIfFalseReg";
+    case OpCode::JumpIfFalseLocal: return "JumpIfFalseLocal";
+    case OpCode::CallHost: return "CallHost";
+    case OpCode::CallFunc: return "CallFunc";
+    case OpCode::NewInstance: return "NewInstance";
+    case OpCode::LoadAttr: return "LoadAttr";
+    case OpCode::StoreAttr: return "StoreAttr";
+    case OpCode::CallMethod: return "CallMethod";
+    case OpCode::CallValue: return "CallValue";
+    case OpCode::CallIntrinsic: return "CallIntrinsic";
+    case OpCode::SpawnFunc: return "SpawnFunc";
+    case OpCode::Await: return "Await";
+    case OpCode::MakeList: return "MakeList";
+    case OpCode::MakeDict: return "MakeDict";
+    case OpCode::Sleep: return "Sleep";
+    case OpCode::Yield: return "Yield";
+    case OpCode::Return: return "Return";
+    case OpCode::Pop: return "Pop";
+    case OpCode::MoveLocalToReg: return "MoveLocalToReg";
+    case OpCode::MoveNameToReg: return "MoveNameToReg";
+    case OpCode::ConstToReg: return "ConstToReg";
+    case OpCode::LoadConst: return "LoadConst";
+    case OpCode::PushReg: return "PushReg";
+    case OpCode::StoreLocalFromReg: return "StoreLocalFromReg";
+    case OpCode::StoreNameFromReg: return "StoreNameFromReg";
+    case OpCode::AddLocalLocal: return "AddLocalLocal";
+    case OpCode::SubLocalLocal: return "SubLocalLocal";
+    case OpCode::MulLocalLocal: return "MulLocalLocal";
+    case OpCode::DivLocalLocal: return "DivLocalLocal";
+    case OpCode::LessLocalLocal: return "LessLocalLocal";
+    case OpCode::GreaterLocalLocal: return "GreaterLocalLocal";
+    case OpCode::EqualLocalLocal: return "EqualLocalLocal";
+    case OpCode::NotEqualLocalLocal: return "NotEqualLocalLocal";
+    case OpCode::LessEqualLocalLocal: return "LessEqualLocalLocal";
+    case OpCode::GreaterEqualLocalLocal: return "GreaterEqualLocalLocal";
+    case OpCode::NegLocal: return "NegLocal";
+    case OpCode::NotLocal: return "NotLocal";
+    case OpCode::PushLocal: return "PushLocal";
+    case OpCode::PushName: return "PushName";
+    }
+    return "Unknown";
+}
+
+std::string valueForDis(const Module& module, const Value& value) {
+    switch (value.type) {
+    case ValueType::Nil:
+    case ValueType::Int:
+    case ValueType::Float:
+    case ValueType::Ref:
+    case ValueType::Function:
+    case ValueType::Class:
+    case ValueType::Module: {
+        std::ostringstream out;
+        out << value;
+        return out.str();
+    }
+    case ValueType::String: {
+        const auto index = static_cast<std::size_t>(value.asStringIndex());
+        if (index < module.strings.size()) {
+            return std::string("\"") + module.strings[index] + "\"";
+        }
+        return std::string("str#") + std::to_string(index);
+    }
+    }
+    return "?";
+}
+
+bool isTemporaryLocalName(const std::string& name) {
+    return name.rfind("__", 0) == 0;
+}
+
+std::string formatLocalSlotForDis(std::int32_t slot, const FunctionIR* ir) {
+    std::string text = std::string("local[") + std::to_string(slot) + "]";
+    if (!ir || slot < 0) {
+        return text;
+    }
+    const auto index = static_cast<std::size_t>(slot);
+    if (index >= ir->localDebugNames.size()) {
+        return text;
+    }
+    const std::string& localName = ir->localDebugNames[index];
+    if (localName.empty() || !isTemporaryLocalName(localName)) {
+        return text;
+    }
+    return text + "{tmp:" + localName + "}";
+}
+
+std::string bytecodeOperandHint(const Module& module, const Instruction& ins, const FunctionIR* ir = nullptr) {
+    switch (ins.op) {
+    case OpCode::PushConst: {
+        const auto index = static_cast<std::size_t>(ins.a);
+        if (index < module.constants.size()) {
+            return std::string("const[") + std::to_string(ins.a) + "]=" + valueForDis(module, module.constants[index]);
+        }
+        return std::string("const[") + std::to_string(ins.a) + "]";
+    }
+    case OpCode::LoadName:
+    case OpCode::PushName:
+    case OpCode::StoreName:
+    case OpCode::LoadAttr:
+    case OpCode::StoreAttr:
+    case OpCode::CallHost:
+    case OpCode::CallMethod: {
+        const auto index = static_cast<std::size_t>(ins.a);
+        if (index < module.strings.size()) {
+            return std::string("name[") + std::to_string(ins.a) + "]=" + module.strings[index];
+        }
+        return std::string("name[") + std::to_string(ins.a) + "]";
+    }
+    case OpCode::CallFunc:
+    case OpCode::SpawnFunc: {
+        const auto index = static_cast<std::size_t>(ins.a);
+        if (index < module.functions.size()) {
+            return std::string("fn[") + std::to_string(ins.a) + "]=" + module.functions[index].name;
+        }
+        return std::string("fn[") + std::to_string(ins.a) + "]";
+    }
+    case OpCode::Jump:
+    case OpCode::JumpIfFalse:
+    case OpCode::JumpIfFalseReg:
+        return std::string("target=") + std::to_string(ins.a);
+    case OpCode::JumpIfFalseLocal:
+        return formatLocalSlotForDis(ins.a, ir) + " target=" + std::to_string(ins.b);
+    case OpCode::LoadLocal:
+    case OpCode::PushLocal:
+    case OpCode::StoreLocal:
+    case OpCode::MoveLocalToReg:
+    case OpCode::StoreLocalFromReg:
+        return formatLocalSlotForDis(ins.a, ir);
+    case OpCode::LoadConst: {
+        const auto constIndex = static_cast<std::size_t>(ins.a);
+        std::string valueHint = std::string("const[") + std::to_string(ins.a) + "]";
+        if (constIndex < module.constants.size()) {
+            valueHint += "=" + valueForDis(module, module.constants[constIndex]);
+        }
+        return valueHint + " -> " + formatLocalSlotForDis(ins.b, ir);
+    }
+    case OpCode::MoveNameToReg:
+    case OpCode::StoreNameFromReg: {
+        const auto index = static_cast<std::size_t>(ins.a);
+        if (index < module.strings.size()) {
+            return std::string("name[") + std::to_string(ins.a) + "]=" + module.strings[index];
+        }
+        return std::string("name[") + std::to_string(ins.a) + "]";
+    }
+    case OpCode::ConstToReg: {
+        const auto index = static_cast<std::size_t>(ins.a);
+        if (index < module.constants.size()) {
+            return std::string("const[") + std::to_string(ins.a) + "]=" + valueForDis(module, module.constants[index]);
+        }
+        return std::string("const[") + std::to_string(ins.a) + "]";
+    }
+    case OpCode::AddLocalLocal:
+    case OpCode::SubLocalLocal:
+    case OpCode::MulLocalLocal:
+    case OpCode::DivLocalLocal:
+    case OpCode::LessLocalLocal:
+    case OpCode::GreaterLocalLocal:
+    case OpCode::EqualLocalLocal:
+    case OpCode::NotEqualLocalLocal:
+    case OpCode::LessEqualLocalLocal:
+    case OpCode::GreaterEqualLocalLocal:
+        return formatLocalSlotForDis(ins.a, ir) + ", " + formatLocalSlotForDis(ins.b, ir) + " -> reg";
+    case OpCode::NegLocal:
+    case OpCode::NotLocal:
+        return formatLocalSlotForDis(ins.a, ir) + " -> reg";
+    default:
+        return {};
+    }
+}
+
+std::string irOperandHint(const Module& module, const IRInstruction& ins) {
+    const Instruction lowered{ins.op, ins.a, ins.b};
+    return bytecodeOperandHint(module, lowered);
+}
+
+void writeTextStrict(const std::filesystem::path& path, const std::string& text) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("error: failed to write compiler debug output: " + path.string() + " [function: <module>]");
+    }
+    out << text;
+    out.flush();
+    if (!out) {
+        throw std::runtime_error("error: failed to flush compiler debug output: " + path.string() + " [function: <module>]");
+    }
+}
+
+std::string buildIrDisassemblyText(const std::string& sourcePath,
+                                   const Module& module,
+                                   const std::vector<FunctionIR>& functionIrs) {
+    std::ostringstream out;
+    out << "# GameScript IR Disassembly\n";
+    out << "source: " << sourcePath << "\n";
+    out << "function_count: " << functionIrs.size() << "\n\n";
+    for (const auto& ir : functionIrs) {
+        out << "func " << ir.name << "(";
+        for (std::size_t i = 0; i < ir.params.size(); ++i) {
+            if (i > 0) {
+                out << ", ";
+            }
+            out << ir.params[i];
+        }
+        out << ") locals=" << ir.localCount << " est_stack=" << estimateStackSlots(ir) << "\n";
+        out << " idx  line:col  op               a      b      delta  note\n";
+        out << " ---- --------- ---------------- ------ ------ ------ ----------------\n";
+        for (std::size_t i = 0; i < ir.code.size(); ++i) {
+            const auto& ins = ir.code[i];
+            out << std::setw(4) << i << " "
+                << std::setw(4) << ins.line << ":" << std::left << std::setw(4) << ins.column << std::right << " "
+                << std::left << std::setw(16) << opcodeName(ins.op) << std::right << " "
+                << std::setw(6) << ins.a << " "
+                << std::setw(6) << ins.b << " "
+                << std::setw(6) << stackDelta(ins) << " "
+                << irOperandHint(module, ins) << "\n";
+        }
+        out << "\n";
+    }
+    return out.str();
+}
+
+std::string buildBytecodeDisassemblyText(const std::string& sourcePath,
+                                         const Module& module,
+                                         const std::vector<FunctionIR>& functionIrs) {
+    std::ostringstream out;
+    out << "# GameScript Bytecode Disassembly\n";
+    out << "source: " << sourcePath << "\n";
+    out << "constants: " << module.constants.size() << "\n";
+    for (std::size_t i = 0; i < module.constants.size(); ++i) {
+        out << "  [" << i << "] " << valueForDis(module, module.constants[i]) << "\n";
+    }
+    out << "strings: " << module.strings.size() << "\n";
+    for (std::size_t i = 0; i < module.strings.size(); ++i) {
+        out << "  [" << i << "] " << module.strings[i] << "\n";
+    }
+    out << "\nfunctions: " << module.functions.size() << "\n\n";
+
+    std::unordered_map<std::string, const FunctionIR*> irByName;
+    for (const auto& ir : functionIrs) {
+        irByName[ir.name] = &ir;
+    }
+
+    for (const auto& fn : module.functions) {
+        const FunctionIR* ir = nullptr;
+        auto foundIr = irByName.find(fn.name);
+        if (foundIr != irByName.end()) {
+            ir = foundIr->second;
+        }
+        out << "func " << fn.name << "(";
+        for (std::size_t i = 0; i < fn.params.size(); ++i) {
+            if (i > 0) {
+                out << ", ";
+            }
+            out << fn.params[i];
+        }
+        out << ") locals=" << fn.localCount << " stack_slots=" << fn.stackSlotCount << "\n";
+        out << " idx  off  line:col  op               a      b      note\n";
+        out << " ---- ---- --------- ---------------- ------ ------ ----------------\n";
+        for (std::size_t i = 0; i < fn.code.size(); ++i) {
+            const auto& ins = fn.code[i];
+            std::size_t line = 0;
+            std::size_t column = 0;
+            if (ir && i < ir->code.size()) {
+                line = ir->code[i].line;
+                column = ir->code[i].column;
+            }
+            out << std::setw(4) << i << " "
+                << std::setw(4) << i << " "
+                << std::setw(4) << line << ":" << std::left << std::setw(4) << column << std::right << " "
+                << std::left << std::setw(16) << opcodeName(ins.op) << std::right << " "
+                << std::setw(6) << ins.a << " "
+                << std::setw(6) << ins.b << " "
+                << bytecodeOperandHint(module, ins, ir) << "\n";
+        }
+        out << "\n";
+    }
+
+    return out.str();
+}
+
+void dumpCompilerDebugFiles(const std::string& sourcePath,
+                            const Module& module,
+                            const std::vector<FunctionIR>& functionIrs) {
+    namespace fs = std::filesystem;
+    fs::path source(sourcePath);
+    fs::path outputDir = source.parent_path() / ".gsdebug";
+    std::error_code ec;
+    fs::create_directories(outputDir, ec);
+    if (ec) {
+        throw std::runtime_error("error: failed to create compiler debug directory: " + outputDir.string() + " [function: <module>]");
+    }
+
+    const std::string stem = source.stem().string();
+    const fs::path irPath = outputDir / (stem + ".ir.dis");
+    const fs::path opPath = outputDir / (stem + ".opcode.dis");
+    writeTextStrict(irPath, buildIrDisassemblyText(sourcePath, module, functionIrs));
+    writeTextStrict(opPath, buildBytecodeDisassemblyText(sourcePath, module, functionIrs));
 }
 
 std::vector<std::string> splitLines(const std::string& source) {
@@ -779,29 +1110,237 @@ std::int32_t addString(Module& module, const std::string& value) {
     return static_cast<std::int32_t>(module.strings.size() - 1);
 }
 
-void emit(std::vector<Instruction>& code, OpCode op, std::int32_t a = 0, std::int32_t b = 0) {
-    code.push_back({op, a, b});
+void emit(std::vector<IRInstruction>& code,
+          OpCode op,
+          std::int32_t a = 0,
+          std::int32_t b = 0,
+          std::size_t line = 0,
+          std::size_t column = 0) {
+    code.push_back({op, a, b, line, column});
 }
 
-std::size_t emitJump(std::vector<Instruction>& code, OpCode op) {
-    code.push_back({op, -1, 0});
+std::size_t emitJump(std::vector<IRInstruction>& code,
+                     OpCode op,
+                     std::size_t line = 0,
+                     std::size_t column = 0) {
+    code.push_back({op, -1, 0, line, column});
     return code.size() - 1;
 }
 
-void patchJump(std::vector<Instruction>& code, std::size_t jumpIndex, std::size_t targetIndex) {
+std::size_t emitJumpIfFalseReg(std::vector<IRInstruction>& code,
+                               std::size_t line = 0,
+                               std::size_t column = 0) {
+    code.push_back({OpCode::JumpIfFalseReg, -1, 0, line, column});
+    return code.size() - 1;
+}
+
+void patchJump(std::vector<IRInstruction>& code, std::size_t jumpIndex, std::size_t targetIndex) {
     code[jumpIndex].a = static_cast<std::int32_t>(targetIndex);
 }
 
 std::size_t ensureLocal(std::unordered_map<std::string, std::size_t>& locals,
-                        FunctionBytecode& fn,
-                        const std::string& name) {
+                        std::size_t& localCount,
+                        const std::string& name,
+                        FunctionIR* functionIr = nullptr) {
     auto it = locals.find(name);
     if (it != locals.end()) {
         return it->second;
     }
-    const std::size_t slot = fn.localCount;
+    const std::size_t slot = localCount;
     locals[name] = slot;
-    ++fn.localCount;
+    if (functionIr) {
+        if (functionIr->localDebugNames.size() <= slot) {
+            functionIr->localDebugNames.resize(slot + 1);
+        }
+        functionIr->localDebugNames[slot] = name;
+    }
+    ++localCount;
+    return slot;
+}
+
+void emitLocalValueToStack(std::vector<IRInstruction>& code, std::size_t slot) {
+    emit(code, OpCode::PushLocal, static_cast<std::int32_t>(slot), 0);
+}
+
+void emitNameValueToStack(std::vector<IRInstruction>& code, std::int32_t nameIndex) {
+    emit(code, OpCode::PushName, nameIndex, 0);
+}
+
+bool tryCompileExprToRegister(const Expr& expr,
+                              Module& module,
+                              const std::unordered_map<std::string, std::size_t>& locals,
+                              const std::unordered_map<std::string, std::size_t>& funcIndex,
+                              const std::unordered_map<std::string, std::size_t>& classIndex,
+                              const std::string& currentFunctionName,
+                              std::vector<IRInstruction>& code) {
+    (void)currentFunctionName;
+    switch (expr.type) {
+    case ExprType::Number:
+        emit(code, OpCode::ConstToReg, addConstant(module, expr.value), 0);
+        return true;
+    case ExprType::StringLiteral:
+        emit(code,
+             OpCode::ConstToReg,
+             addConstant(module, Value::String(addString(module, expr.stringLiteral))),
+             0);
+        return true;
+    case ExprType::Variable: {
+        const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                          module,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          expr.name);
+        if (resolved.found) {
+            emit(code, OpCode::MoveLocalToReg, static_cast<std::int32_t>(resolved.localSlot), 0);
+        } else {
+            emit(code, OpCode::MoveNameToReg, addString(module, expr.name), 0);
+        }
+        return true;
+    }
+    case ExprType::Unary: {
+        if (!expr.right) {
+            return false;
+        }
+        if (expr.right->type != ExprType::Variable) {
+            return false;
+        }
+
+        const SymbolLookupResult operand = resolveSymbol(locals,
+                                                         module,
+                                                         funcIndex,
+                                                         classIndex,
+                                                         expr.right->name);
+        if (!operand.found) {
+            return false;
+        }
+
+        switch (expr.unaryOp) {
+        case TokenType::Minus:
+            emit(code, OpCode::NegLocal, static_cast<std::int32_t>(operand.localSlot), 0);
+            return true;
+        case TokenType::Bang:
+            emit(code, OpCode::NotLocal, static_cast<std::int32_t>(operand.localSlot), 0);
+            return true;
+        default:
+            return false;
+        }
+    }
+    case ExprType::Binary: {
+        if (!expr.left || !expr.right ||
+            expr.left->type != ExprType::Variable ||
+            expr.right->type != ExprType::Variable) {
+            return false;
+        }
+
+        const SymbolLookupResult left = resolveSymbol(locals,
+                                                      module,
+                                                      funcIndex,
+                                                      classIndex,
+                                                      expr.left->name);
+        const SymbolLookupResult right = resolveSymbol(locals,
+                                                       module,
+                                                       funcIndex,
+                                                       classIndex,
+                                                       expr.right->name);
+        if (!left.found || !right.found) {
+            return false;
+        }
+
+        switch (expr.binaryOp) {
+        case TokenType::Plus:
+            emit(code, OpCode::AddLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::Minus:
+            emit(code, OpCode::SubLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::Star:
+            emit(code, OpCode::MulLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::Slash:
+            emit(code, OpCode::DivLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::Less:
+            emit(code, OpCode::LessLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::Greater:
+            emit(code, OpCode::GreaterLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::EqualEqual:
+            emit(code, OpCode::EqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::BangEqual:
+            emit(code, OpCode::NotEqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::LessEqual:
+            emit(code, OpCode::LessEqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        case TokenType::GreaterEqual:
+            emit(code, OpCode::GreaterEqualLocalLocal, static_cast<std::int32_t>(left.localSlot), static_cast<std::int32_t>(right.localSlot));
+            return true;
+        default:
+            return false;
+        }
+    }
+    default:
+        return false;
+    }
+}
+
+bool tryGetLocalLocalBinaryOp(TokenType token, OpCode& outOp) {
+    switch (token) {
+    case TokenType::Plus: outOp = OpCode::AddLocalLocal; return true;
+    case TokenType::Minus: outOp = OpCode::SubLocalLocal; return true;
+    case TokenType::Star: outOp = OpCode::MulLocalLocal; return true;
+    case TokenType::Slash: outOp = OpCode::DivLocalLocal; return true;
+    case TokenType::Less: outOp = OpCode::LessLocalLocal; return true;
+    case TokenType::Greater: outOp = OpCode::GreaterLocalLocal; return true;
+    case TokenType::EqualEqual: outOp = OpCode::EqualLocalLocal; return true;
+    case TokenType::BangEqual: outOp = OpCode::NotEqualLocalLocal; return true;
+    case TokenType::LessEqual: outOp = OpCode::LessEqualLocalLocal; return true;
+    case TokenType::GreaterEqual: outOp = OpCode::GreaterEqualLocalLocal; return true;
+    default: return false;
+    }
+}
+
+bool tryExtractConstValue(const Expr& expr, Module& module, Value& outValue) {
+    switch (expr.type) {
+    case ExprType::Number:
+        outValue = expr.value;
+        return true;
+    case ExprType::StringLiteral:
+        outValue = Value::String(addString(module, expr.stringLiteral));
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::string makeConstTempKey(const Value& value) {
+    return std::to_string(static_cast<int>(value.type)) + ":" + std::to_string(value.payload);
+}
+
+std::size_t ensureConstTempLocalSlot(const Value& value,
+                                     Module& module,
+                                     std::unordered_map<std::string, std::size_t>& locals,
+                                     FunctionIR& out,
+                                     std::unordered_map<std::string, std::size_t>& constTempSlots) {
+    const std::string key = makeConstTempKey(value);
+    auto found = constTempSlots.find(key);
+    if (found != constTempSlots.end()) {
+        return found->second;
+    }
+
+    std::string tempName = "__gs_const_tmp_" + std::to_string(constTempSlots.size());
+    while (locals.contains(tempName)) {
+        tempName = "__gs_const_tmp_" + std::to_string(locals.size() + constTempSlots.size());
+    }
+    const std::size_t slot = ensureLocal(locals, out.localCount, tempName, &out);
+    constTempSlots[key] = slot;
+
+    emit(out.code,
+         OpCode::LoadConst,
+         addConstant(module, value),
+         static_cast<std::int32_t>(slot));
     return slot;
 }
 
@@ -811,7 +1350,288 @@ void compileExpr(const Expr& expr,
                  const std::unordered_map<std::string, std::size_t>& funcIndex,
                  const std::unordered_map<std::string, std::size_t>& classIndex,
                  const std::string& currentFunctionName,
-                 std::vector<Instruction>& code) {
+                 std::vector<IRInstruction>& code);
+
+bool tryResolveOperandLocalSlot(const Expr& operand,
+                                Module& module,
+                                std::unordered_map<std::string, std::size_t>& locals,
+                                const std::unordered_map<std::string, std::size_t>& funcIndex,
+                                const std::unordered_map<std::string, std::size_t>& classIndex,
+                                FunctionIR& out,
+                                std::unordered_map<std::string, std::size_t>& constTempSlots,
+                                std::size_t& outSlot) {
+    Value constValue = Value::Nil();
+    if (tryExtractConstValue(operand, module, constValue)) {
+        outSlot = ensureConstTempLocalSlot(constValue, module, locals, out, constTempSlots);
+        return true;
+    }
+
+    if (operand.type != ExprType::Variable) {
+        return false;
+    }
+
+    const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                      module,
+                                                      funcIndex,
+                                                      classIndex,
+                                                      operand.name);
+    if (!resolved.found) {
+        return false;
+    }
+    outSlot = resolved.localSlot;
+    return true;
+}
+
+bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
+                                           Module& module,
+                                           std::unordered_map<std::string, std::size_t>& locals,
+                                           const std::unordered_map<std::string, std::size_t>& funcIndex,
+                                           const std::unordered_map<std::string, std::size_t>& classIndex,
+                                           const std::string& currentFunctionName,
+                                           FunctionIR& out,
+                                           std::unordered_map<std::string, std::size_t>& constTempSlots) {
+    (void)constTempSlots;
+
+    if (expr.type != ExprType::Binary && expr.type != ExprType::Unary) {
+        return false;
+    }
+
+    std::unordered_map<std::string, std::size_t> constUseCounts;
+    std::unordered_map<std::string, Value> constValues;
+    std::function<void(const Expr&)> collectConstUsage = [&](const Expr& node) {
+        Value constValue = Value::Nil();
+        if (tryExtractConstValue(node, module, constValue)) {
+            const std::string key = makeConstTempKey(constValue);
+            ++constUseCounts[key];
+            constValues[key] = constValue;
+            return;
+        }
+        if (node.left) {
+            collectConstUsage(*node.left);
+        }
+        if (node.right) {
+            collectConstUsage(*node.right);
+        }
+    };
+    collectConstUsage(expr);
+
+    std::vector<std::size_t> reusableSlots;
+    std::unordered_map<std::string, std::size_t> activeConstSlots;
+    std::size_t exprTempOrdinal = 0;
+    std::size_t constTempOrdinal = 0;
+
+    auto acquireReusableSlot = [&](const std::string& prefix, std::size_t& ordinal) -> std::size_t {
+        if (!reusableSlots.empty()) {
+            const std::size_t slot = reusableSlots.back();
+            reusableSlots.pop_back();
+            if (out.localDebugNames.size() <= slot) {
+                out.localDebugNames.resize(slot + 1);
+            }
+            out.localDebugNames[slot] = prefix + std::to_string(ordinal++);
+            return slot;
+        }
+
+        std::string tempName = prefix + std::to_string(ordinal++);
+        while (locals.contains(tempName)) {
+            tempName = prefix + std::to_string(ordinal++);
+        }
+        return ensureLocal(locals, out.localCount, tempName, &out);
+    };
+
+    auto releaseReusableSlot = [&](std::size_t slot) {
+        reusableSlots.push_back(slot);
+    };
+
+    auto acquireConstSlot = [&](const std::string& key) -> std::size_t {
+        auto found = activeConstSlots.find(key);
+        if (found != activeConstSlots.end()) {
+            return found->second;
+        }
+
+        const std::size_t slot = acquireReusableSlot("__gs_const_tmp_", constTempOrdinal);
+        const Value& value = constValues.at(key);
+        emit(out.code,
+             OpCode::LoadConst,
+             addConstant(module, value),
+             static_cast<std::int32_t>(slot));
+        activeConstSlots[key] = slot;
+        return slot;
+    };
+
+    auto consumeConstUse = [&](const std::string& key) {
+        auto foundCount = constUseCounts.find(key);
+        if (foundCount == constUseCounts.end()) {
+            return;
+        }
+        if (foundCount->second == 0) {
+            return;
+        }
+        --foundCount->second;
+        if (foundCount->second != 0) {
+            return;
+        }
+
+        constUseCounts.erase(foundCount);
+        auto foundSlot = activeConstSlots.find(key);
+        if (foundSlot != activeConstSlots.end()) {
+            releaseReusableSlot(foundSlot->second);
+            activeConstSlots.erase(foundSlot);
+        }
+    };
+
+    struct LoweredValue {
+        std::size_t slot{0};
+        bool releasable{false};
+        std::string constKey;
+    };
+
+    std::function<bool(const Expr&, bool, LoweredValue&)> lowerExprToLocalSlot;
+    lowerExprToLocalSlot = [&](const Expr& node, bool requireStoredSlot, LoweredValue& lowered) -> bool {
+        Value constValue = Value::Nil();
+        if (tryExtractConstValue(node, module, constValue)) {
+            const std::string key = makeConstTempKey(constValue);
+            lowered.slot = acquireConstSlot(key);
+            lowered.releasable = false;
+            lowered.constKey = key;
+            return true;
+        }
+
+        if (node.type == ExprType::Variable) {
+            const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                              module,
+                                                              funcIndex,
+                                                              classIndex,
+                                                              node.name);
+            if (resolved.found) {
+                lowered.slot = resolved.localSlot;
+                lowered.releasable = false;
+                lowered.constKey.clear();
+                return true;
+            }
+        }
+
+        if (node.type == ExprType::Unary && node.right) {
+            LoweredValue operand;
+            if (!lowerExprToLocalSlot(*node.right, true, operand)) {
+                return false;
+            }
+
+            switch (node.unaryOp) {
+            case TokenType::Minus:
+                emit(out.code, OpCode::NegLocal, static_cast<std::int32_t>(operand.slot), 0);
+                break;
+            case TokenType::Bang:
+                emit(out.code, OpCode::NotLocal, static_cast<std::int32_t>(operand.slot), 0);
+                break;
+            default:
+                return false;
+            }
+
+            if (!operand.constKey.empty()) {
+                consumeConstUse(operand.constKey);
+            }
+            if (operand.releasable) {
+                releaseReusableSlot(operand.slot);
+            }
+
+            if (!requireStoredSlot) {
+                lowered.slot = operand.slot;
+                lowered.releasable = false;
+                lowered.constKey.clear();
+                return true;
+            }
+
+            const std::size_t tempSlot = acquireReusableSlot("__gs_expr_tmp_", exprTempOrdinal);
+            emit(out.code,
+                 OpCode::StoreLocalFromReg,
+                 static_cast<std::int32_t>(tempSlot),
+                 0);
+            lowered.slot = tempSlot;
+            lowered.releasable = true;
+            lowered.constKey.clear();
+            return true;
+        }
+
+        if (node.type == ExprType::Binary && node.left && node.right) {
+            OpCode op = OpCode::AddLocalLocal;
+            if (!tryGetLocalLocalBinaryOp(node.binaryOp, op)) {
+                return false;
+            }
+
+            LoweredValue lhs;
+            LoweredValue rhs;
+            if (!lowerExprToLocalSlot(*node.left, true, lhs)) {
+                return false;
+            }
+            if (!lowerExprToLocalSlot(*node.right, true, rhs)) {
+                return false;
+            }
+
+            emit(out.code,
+                 op,
+                 static_cast<std::int32_t>(lhs.slot),
+                 static_cast<std::int32_t>(rhs.slot));
+
+            if (!lhs.constKey.empty()) {
+                consumeConstUse(lhs.constKey);
+            }
+            if (!rhs.constKey.empty()) {
+                consumeConstUse(rhs.constKey);
+            }
+            if (lhs.releasable) {
+                releaseReusableSlot(lhs.slot);
+            }
+            if (rhs.releasable) {
+                releaseReusableSlot(rhs.slot);
+            }
+
+            if (!requireStoredSlot) {
+                lowered.slot = lhs.slot;
+                lowered.releasable = false;
+                lowered.constKey.clear();
+                return true;
+            }
+
+            const std::size_t tempSlot = acquireReusableSlot("__gs_expr_tmp_", exprTempOrdinal);
+            emit(out.code,
+                 OpCode::StoreLocalFromReg,
+                 static_cast<std::int32_t>(tempSlot),
+                 0);
+            lowered.slot = tempSlot;
+            lowered.releasable = true;
+            lowered.constKey.clear();
+            return true;
+        }
+
+        const std::size_t tempSlot = acquireReusableSlot("__gs_expr_tmp_", exprTempOrdinal);
+        compileExpr(node,
+                    module,
+                    locals,
+                    funcIndex,
+                    classIndex,
+                    currentFunctionName,
+                    out.code);
+        emit(out.code,
+             OpCode::StoreLocal,
+             static_cast<std::int32_t>(tempSlot),
+             0);
+        lowered.slot = tempSlot;
+        lowered.releasable = true;
+        lowered.constKey.clear();
+        return true;
+    };
+
+    LoweredValue root;
+    return lowerExprToLocalSlot(expr, false, root);
+}
+
+void compileExpr(const Expr& expr,
+                 Module& module,
+                 const std::unordered_map<std::string, std::size_t>& locals,
+                 const std::unordered_map<std::string, std::size_t>& funcIndex,
+                 const std::unordered_map<std::string, std::size_t>& classIndex,
+                 const std::string& currentFunctionName,
+                 std::vector<IRInstruction>& code) {
     switch (expr.type) {
     case ExprType::Number:
         emit(code, OpCode::PushConst, addConstant(module, expr.value), 0);
@@ -828,14 +1648,35 @@ void compileExpr(const Expr& expr,
                                                           funcIndex,
                                                           classIndex,
                                                           expr.name);
-        if (!resolved.found) {
-            emit(code, OpCode::LoadName, addString(module, expr.name), 0);
-            return;
+        if (resolved.found) {
+            emitLocalValueToStack(code, resolved.localSlot);
+        } else {
+            emitNameValueToStack(code, addString(module, expr.name));
         }
-
-        emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
         return;
     }
+    case ExprType::Unary:
+        if (!expr.right) {
+            throw std::runtime_error(formatCompilerError("Unary expression is incomplete",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
+        }
+        compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        switch (expr.unaryOp) {
+        case TokenType::Minus:
+            emit(code, OpCode::Negate);
+            break;
+        case TokenType::Bang:
+            emit(code, OpCode::Not);
+            break;
+        default:
+            throw std::runtime_error(formatCompilerError("Unsupported unary operator",
+                                                         currentFunctionName,
+                                                         expr.line,
+                                                         expr.column));
+        }
+        return;
     case ExprType::AssignVariable: {
         if (!expr.right) {
             throw std::runtime_error(formatCompilerError("Variable assignment expression is incomplete",
@@ -843,18 +1684,38 @@ void compileExpr(const Expr& expr,
                                                          expr.line,
                                                          expr.column));
         }
-        compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        const bool compiledToReg = tryCompileExprToRegister(*expr.right,
+                                                            module,
+                                                            locals,
+                                                            funcIndex,
+                                                            classIndex,
+                                                            currentFunctionName,
+                                                            code);
+        if (!compiledToReg) {
+            compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
+        }
         const SymbolLookupResult resolved = resolveSymbol(locals,
                                                           module,
                                                           funcIndex,
                                                           classIndex,
                                                           expr.name);
         if (resolved.found) {
-            emit(code, OpCode::StoreLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
-            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+            if (compiledToReg) {
+                emit(code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(resolved.localSlot), 0);
+                emit(code, OpCode::PushReg);
+            } else {
+                emit(code, OpCode::StoreLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+                emitLocalValueToStack(code, resolved.localSlot);
+            }
         } else {
-            emit(code, OpCode::StoreName, addString(module, expr.name), 0);
-            emit(code, OpCode::LoadName, addString(module, expr.name), 0);
+            const auto nameIdx = addString(module, expr.name);
+            if (compiledToReg) {
+                emit(code, OpCode::StoreNameFromReg, nameIdx, 0);
+                emit(code, OpCode::PushReg);
+            } else {
+                emit(code, OpCode::StoreName, nameIdx, 0);
+                emitNameValueToStack(code, nameIdx);
+            }
         }
         return;
     }
@@ -882,6 +1743,16 @@ void compileExpr(const Expr& expr,
         emit(code, OpCode::CallMethod, addString(module, "set"), 2);
         return;
     case ExprType::Binary:
+        if (tryCompileExprToRegister(expr,
+                                     module,
+                                     locals,
+                                     funcIndex,
+                                     classIndex,
+                                     currentFunctionName,
+                                     code)) {
+            emit(code, OpCode::PushReg);
+            return;
+        }
         compileExpr(*expr.left, module, locals, funcIndex, classIndex, currentFunctionName, code);
         compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code);
         switch (expr.binaryOp) {
@@ -961,7 +1832,7 @@ void compileExpr(const Expr& expr,
                 return;
             }
 
-            emit(code, OpCode::LoadLocal, static_cast<std::int32_t>(resolved.localSlot), 0);
+            emitLocalValueToStack(code, resolved.localSlot);
             for (const auto& arg : expr.args) {
                 compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code);
             }
@@ -1023,14 +1894,204 @@ void compileStatements(const std::vector<Stmt>& statements,
                        const std::unordered_map<std::string, std::size_t>& classIndex,
                        const std::string& currentFunctionName,
                        bool isModuleInit,
-                       FunctionBytecode& out,
-                       LoopContext* loopContext) {
+                       FunctionIR& out,
+                       LoopContext* loopContext,
+                       std::unordered_map<std::string, std::size_t>& constTempSlots) {
+    auto compileCallLikeExprWithLoweredArgs = [&](const Expr& expr) -> bool {
+        if (expr.type == ExprType::Call) {
+            if (!expr.callee) {
+                throw std::runtime_error(formatCompilerError("Call expression callee is empty",
+                                                             currentFunctionName,
+                                                             expr.line,
+                                                             expr.column));
+            }
+
+            if (expr.callee->type == ExprType::Variable) {
+                const std::string& calleeName = expr.callee->name;
+                const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                                  module,
+                                                                  funcIndex,
+                                                                  classIndex,
+                                                                  calleeName);
+
+                if (!resolved.found) {
+                    emit(out.code, OpCode::LoadName, addString(module, calleeName), 0);
+                } else {
+                    emitLocalValueToStack(out.code, resolved.localSlot);
+                }
+            } else {
+                compileExpr(*expr.callee,
+                            module,
+                            locals,
+                            funcIndex,
+                            classIndex,
+                            currentFunctionName,
+                            out.code);
+            }
+
+            for (const auto& arg : expr.args) {
+                if (tryLowerBinaryExprToRegWithTempLocals(arg,
+                                                          module,
+                                                          locals,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          currentFunctionName,
+                                                          out,
+                                                          constTempSlots)) {
+                    emit(out.code, OpCode::PushReg);
+                } else {
+                    compileExpr(arg,
+                                module,
+                                locals,
+                                funcIndex,
+                                classIndex,
+                                currentFunctionName,
+                                out.code);
+                }
+            }
+
+            emit(out.code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
+            return true;
+        }
+
+        if (expr.type == ExprType::MethodCall) {
+            if (!expr.object) {
+                throw std::runtime_error(formatCompilerError("Method call object is empty",
+                                                             currentFunctionName,
+                                                             expr.line,
+                                                             expr.column));
+            }
+
+            compileExpr(*expr.object,
+                        module,
+                        locals,
+                        funcIndex,
+                        classIndex,
+                        currentFunctionName,
+                        out.code);
+
+            for (const auto& arg : expr.args) {
+                if (tryLowerBinaryExprToRegWithTempLocals(arg,
+                                                          module,
+                                                          locals,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          currentFunctionName,
+                                                          out,
+                                                          constTempSlots)) {
+                    emit(out.code, OpCode::PushReg);
+                } else {
+                    compileExpr(arg,
+                                module,
+                                locals,
+                                funcIndex,
+                                classIndex,
+                                currentFunctionName,
+                                out.code);
+                }
+            }
+
+            emit(out.code,
+                 OpCode::CallMethod,
+                 addString(module, expr.methodName),
+                 static_cast<std::int32_t>(expr.args.size()));
+            return true;
+        }
+
+        return false;
+    };
+
+    auto compileExprPreferLoweredBinary = [&](const Expr& expr) {
+        if (tryLowerBinaryExprToRegWithTempLocals(expr,
+                                                  module,
+                                                  locals,
+                                                  funcIndex,
+                                                  classIndex,
+                                                  currentFunctionName,
+                                                  out,
+                                                  constTempSlots)) {
+            emit(out.code, OpCode::PushReg);
+            return;
+        }
+        compileExpr(expr,
+                    module,
+                    locals,
+                    funcIndex,
+                    classIndex,
+                    currentFunctionName,
+                    out.code);
+    };
+
+    std::size_t conditionTempOrdinal = 0;
+    auto allocConditionTempSlot = [&]() -> std::size_t {
+        std::string condName = "__gs_cond_tmp_" + std::to_string(conditionTempOrdinal++);
+        while (locals.contains(condName)) {
+            condName = "__gs_cond_tmp_" + std::to_string(conditionTempOrdinal++);
+        }
+        return ensureLocal(locals, out.localCount, condName, &out);
+    };
+
+    auto emitJumpIfConditionFalse = [&](const Expr& expr) -> std::size_t {
+        if (tryLowerBinaryExprToRegWithTempLocals(expr,
+                                                  module,
+                                                  locals,
+                                                  funcIndex,
+                                                  classIndex,
+                                                  currentFunctionName,
+                                                  out,
+                                                  constTempSlots)) {
+            return emitJumpIfFalseReg(out.code);
+        }
+
+        if (tryCompileExprToRegister(expr,
+                                     module,
+                                     locals,
+                                     funcIndex,
+                                     classIndex,
+                                     currentFunctionName,
+                                     out.code)) {
+            return emitJumpIfFalseReg(out.code);
+        }
+
+        compileExpr(expr,
+                    module,
+                    locals,
+                    funcIndex,
+                    classIndex,
+                    currentFunctionName,
+                    out.code);
+        const auto condSlot = allocConditionTempSlot();
+        emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(condSlot), 0);
+        emit(out.code, OpCode::MoveLocalToReg, static_cast<std::int32_t>(condSlot), 0);
+        return emitJumpIfFalseReg(out.code);
+    };
+
     for (const auto& stmt : statements) {
         switch (stmt.type) {
         case StmtType::LetExpr: {
-            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
+            const bool loweredBinaryToReg = tryLowerBinaryExprToRegWithTempLocals(stmt.expr,
+                                                                                   module,
+                                                                                   locals,
+                                                                                   funcIndex,
+                                                                                   classIndex,
+                                                                                   currentFunctionName,
+                                                                                   out,
+                                                                                   constTempSlots);
             if (isModuleInit) {
-                emit(out.code, OpCode::StoreName, addString(module, stmt.name), 0);
+                if (loweredBinaryToReg) {
+                    emit(out.code, OpCode::StoreNameFromReg, addString(module, stmt.name), 0);
+                } else if (tryCompileExprToRegister(stmt.expr,
+                                             module,
+                                             locals,
+                                             funcIndex,
+                                             classIndex,
+                                             currentFunctionName,
+                                             out.code)) {
+                    emit(out.code, OpCode::StoreNameFromReg, addString(module, stmt.name), 0);
+                } else {
+                    compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
+                    emit(out.code, OpCode::StoreName, addString(module, stmt.name), 0);
+                }
             } else {
                 if (locals.contains(stmt.name)) {
                     throw std::runtime_error(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
@@ -1038,8 +2099,27 @@ void compileStatements(const std::vector<Stmt>& statements,
                                                                  stmt.line,
                                                                  stmt.column));
                 }
-                const auto slot = ensureLocal(locals, out, stmt.name);
-                emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
+                const auto slot = ensureLocal(locals, out.localCount, stmt.name, &out);
+                Value letConstValue = Value::Nil();
+                if (tryExtractConstValue(stmt.expr, module, letConstValue)) {
+                    emit(out.code,
+                         OpCode::LoadConst,
+                         addConstant(module, letConstValue),
+                         static_cast<std::int32_t>(slot));
+                } else if (loweredBinaryToReg) {
+                    emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(slot));
+                } else if (tryCompileExprToRegister(stmt.expr,
+                                             module,
+                                             locals,
+                                             funcIndex,
+                                             classIndex,
+                                             currentFunctionName,
+                                             out.code)) {
+                    emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(slot));
+                } else {
+                    compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
+                    emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(slot));
+                }
             }
             break;
         }
@@ -1056,8 +2136,13 @@ void compileStatements(const std::vector<Stmt>& statements,
                                                          stmt.column));
         }
         case StmtType::ForRange: {
-            const auto iterSlot = ensureLocal(locals, out, stmt.iterKey);
-            const auto endSlot = ensureLocal(locals, out, "__for_end_" + stmt.iterKey + std::to_string(out.code.size()));
+            const auto iterSlot = ensureLocal(locals, out.localCount, stmt.iterKey, &out);
+            const auto endSlot = ensureLocal(locals, out.localCount, "__for_end_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto oneSlot = ensureConstTempLocalSlot(Value::Int(1),
+                                                          module,
+                                                          locals,
+                                                          out,
+                                                          constTempSlots);
 
             compileExpr(stmt.rangeStart, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(iterSlot));
@@ -1065,19 +2150,30 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(endSlot));
 
             const std::size_t loopStart = out.code.size();
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(iterSlot));
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(endSlot));
-            emit(out.code, OpCode::LessThan);
-            const std::size_t exitJump = emitJump(out.code, OpCode::JumpIfFalse);
+              emit(out.code,
+                  OpCode::LessLocalLocal,
+                  static_cast<std::int32_t>(iterSlot),
+                  static_cast<std::int32_t>(endSlot));
+              const std::size_t exitJump = emitJumpIfFalseReg(out.code);
 
             LoopContext localLoop;
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
+            compileStatements(stmt.body,
+                              module,
+                              locals,
+                              funcIndex,
+                              classIndex,
+                              currentFunctionName,
+                              isModuleInit,
+                              out,
+                              &localLoop,
+                              constTempSlots);
 
             localLoop.continueTarget = out.code.size();
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(iterSlot));
-            emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(1)));
-            emit(out.code, OpCode::Add);
-            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(iterSlot));
+              emit(out.code,
+                  OpCode::AddLocalLocal,
+                  static_cast<std::int32_t>(iterSlot),
+                  static_cast<std::int32_t>(oneSlot));
+              emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(iterSlot));
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
             const std::size_t loopEnd = out.code.size();
@@ -1091,10 +2187,15 @@ void compileStatements(const std::vector<Stmt>& statements,
             break;
         }
         case StmtType::ForList: {
-            const auto itemSlot = ensureLocal(locals, out, stmt.iterKey);
-            const auto listSlot = ensureLocal(locals, out, "__for_list_" + stmt.iterKey + std::to_string(out.code.size()));
-            const auto indexSlot = ensureLocal(locals, out, "__for_idx_" + stmt.iterKey + std::to_string(out.code.size()));
-            const auto sizeSlot = ensureLocal(locals, out, "__for_size_" + stmt.iterKey + std::to_string(out.code.size()));
+            const auto itemSlot = ensureLocal(locals, out.localCount, stmt.iterKey, &out);
+            const auto listSlot = ensureLocal(locals, out.localCount, "__for_list_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto indexSlot = ensureLocal(locals, out.localCount, "__for_idx_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto sizeSlot = ensureLocal(locals, out.localCount, "__for_size_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto oneSlot = ensureConstTempLocalSlot(Value::Int(1),
+                                                          module,
+                                                          locals,
+                                                          out,
+                                                          constTempSlots);
 
             compileExpr(stmt.iterable, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(listSlot));
@@ -1102,28 +2203,41 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(indexSlot));
 
             const std::size_t loopStart = out.code.size();
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(listSlot));
+            emitLocalValueToStack(out.code, listSlot);
             emit(out.code, OpCode::CallMethod, addString(module, "size"), 0);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(sizeSlot));
 
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(sizeSlot));
-            emit(out.code, OpCode::LessThan);
-            const std::size_t exitJump = emitJump(out.code, OpCode::JumpIfFalse);
+            emitLocalValueToStack(out.code, indexSlot);
+            emitLocalValueToStack(out.code, sizeSlot);
+              emit(out.code,
+                  OpCode::LessLocalLocal,
+                  static_cast<std::int32_t>(indexSlot),
+                  static_cast<std::int32_t>(sizeSlot));
+              const std::size_t exitJump = emitJumpIfFalseReg(out.code);
 
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(listSlot));
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
+            emitLocalValueToStack(out.code, listSlot);
+            emitLocalValueToStack(out.code, indexSlot);
             emit(out.code, OpCode::CallMethod, addString(module, "get"), 1);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(itemSlot));
 
             LoopContext localLoop;
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
+            compileStatements(stmt.body,
+                              module,
+                              locals,
+                              funcIndex,
+                              classIndex,
+                              currentFunctionName,
+                              isModuleInit,
+                              out,
+                              &localLoop,
+                              constTempSlots);
 
             localLoop.continueTarget = out.code.size();
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
-            emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(1)));
-            emit(out.code, OpCode::Add);
-            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(indexSlot));
+              emit(out.code,
+                  OpCode::AddLocalLocal,
+                  static_cast<std::int32_t>(indexSlot),
+                  static_cast<std::int32_t>(oneSlot));
+              emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(indexSlot));
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
             const std::size_t loopEnd = out.code.size();
@@ -1137,11 +2251,16 @@ void compileStatements(const std::vector<Stmt>& statements,
             break;
         }
         case StmtType::ForDict: {
-            const auto keySlot = ensureLocal(locals, out, stmt.iterKey);
-            const auto valueSlot = ensureLocal(locals, out, stmt.iterValue);
-            const auto dictSlot = ensureLocal(locals, out, "__for_dict_" + stmt.iterKey + std::to_string(out.code.size()));
-            const auto indexSlot = ensureLocal(locals, out, "__for_idx_" + stmt.iterKey + std::to_string(out.code.size()));
-            const auto sizeSlot = ensureLocal(locals, out, "__for_size_" + stmt.iterKey + std::to_string(out.code.size()));
+            const auto keySlot = ensureLocal(locals, out.localCount, stmt.iterKey, &out);
+            const auto valueSlot = ensureLocal(locals, out.localCount, stmt.iterValue, &out);
+            const auto dictSlot = ensureLocal(locals, out.localCount, "__for_dict_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto indexSlot = ensureLocal(locals, out.localCount, "__for_idx_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto sizeSlot = ensureLocal(locals, out.localCount, "__for_size_" + stmt.iterKey + std::to_string(out.code.size()), &out);
+            const auto oneSlot = ensureConstTempLocalSlot(Value::Int(1),
+                                                          module,
+                                                          locals,
+                                                          out,
+                                                          constTempSlots);
 
             compileExpr(stmt.iterable, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(dictSlot));
@@ -1149,33 +2268,46 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(indexSlot));
 
             const std::size_t loopStart = out.code.size();
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(dictSlot));
+            emitLocalValueToStack(out.code, dictSlot);
             emit(out.code, OpCode::CallMethod, addString(module, "size"), 0);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(sizeSlot));
 
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(sizeSlot));
-            emit(out.code, OpCode::LessThan);
-            const std::size_t exitJump = emitJump(out.code, OpCode::JumpIfFalse);
+            emitLocalValueToStack(out.code, indexSlot);
+            emitLocalValueToStack(out.code, sizeSlot);
+              emit(out.code,
+                  OpCode::LessLocalLocal,
+                  static_cast<std::int32_t>(indexSlot),
+                  static_cast<std::int32_t>(sizeSlot));
+              const std::size_t exitJump = emitJumpIfFalseReg(out.code);
 
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(dictSlot));
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
+            emitLocalValueToStack(out.code, dictSlot);
+            emitLocalValueToStack(out.code, indexSlot);
             emit(out.code, OpCode::CallMethod, addString(module, "key_at"), 1);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(keySlot));
 
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(dictSlot));
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
+            emitLocalValueToStack(out.code, dictSlot);
+            emitLocalValueToStack(out.code, indexSlot);
             emit(out.code, OpCode::CallMethod, addString(module, "value_at"), 1);
             emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(valueSlot));
 
             LoopContext localLoop;
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
+            compileStatements(stmt.body,
+                              module,
+                              locals,
+                              funcIndex,
+                              classIndex,
+                              currentFunctionName,
+                              isModuleInit,
+                              out,
+                              &localLoop,
+                              constTempSlots);
 
             localLoop.continueTarget = out.code.size();
-            emit(out.code, OpCode::LoadLocal, static_cast<std::int32_t>(indexSlot));
-            emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(1)));
-            emit(out.code, OpCode::Add);
-            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(indexSlot));
+              emit(out.code,
+                  OpCode::AddLocalLocal,
+                  static_cast<std::int32_t>(indexSlot),
+                  static_cast<std::int32_t>(oneSlot));
+              emit(out.code, OpCode::StoreLocalFromReg, static_cast<std::int32_t>(indexSlot));
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
             const std::size_t loopEnd = out.code.size();
@@ -1191,15 +2323,32 @@ void compileStatements(const std::vector<Stmt>& statements,
         case StmtType::If: {
             std::vector<std::size_t> endJumps;
             for (std::size_t i = 0; i < stmt.branchConditions.size(); ++i) {
-                compileExpr(stmt.branchConditions[i], module, locals, funcIndex, classIndex, currentFunctionName, out.code);
-                const std::size_t falseJump = emitJump(out.code, OpCode::JumpIfFalse);
-                compileStatements(stmt.branchBodies[i], module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, loopContext);
+                const std::size_t falseJump = emitJumpIfConditionFalse(stmt.branchConditions[i]);
+                compileStatements(stmt.branchBodies[i],
+                                  module,
+                                  locals,
+                                  funcIndex,
+                                  classIndex,
+                                  currentFunctionName,
+                                  isModuleInit,
+                                  out,
+                                  loopContext,
+                                  constTempSlots);
                 endJumps.push_back(emitJump(out.code, OpCode::Jump));
                 patchJump(out.code, falseJump, out.code.size());
             }
 
             if (!stmt.elseBody.empty()) {
-                compileStatements(stmt.elseBody, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, loopContext);
+                compileStatements(stmt.elseBody,
+                                  module,
+                                  locals,
+                                  funcIndex,
+                                  classIndex,
+                                  currentFunctionName,
+                                  isModuleInit,
+                                  out,
+                                  loopContext,
+                                  constTempSlots);
             }
 
             const std::size_t afterIf = out.code.size();
@@ -1213,10 +2362,18 @@ void compileStatements(const std::vector<Stmt>& statements,
             const std::size_t loopStart = out.code.size();
             localLoop.continueTarget = loopStart;
 
-            compileExpr(stmt.condition, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
-            const std::size_t exitJump = emitJump(out.code, OpCode::JumpIfFalse);
+            const std::size_t exitJump = emitJumpIfConditionFalse(stmt.condition);
 
-            compileStatements(stmt.body, module, locals, funcIndex, classIndex, currentFunctionName, isModuleInit, out, &localLoop);
+            compileStatements(stmt.body,
+                              module,
+                              locals,
+                              funcIndex,
+                              classIndex,
+                              currentFunctionName,
+                              isModuleInit,
+                              out,
+                              &localLoop,
+                              constTempSlots);
             emit(out.code, OpCode::Jump, static_cast<std::int32_t>(loopStart));
 
             const std::size_t loopEnd = out.code.size();
@@ -1248,11 +2405,127 @@ void compileStatements(const std::vector<Stmt>& statements,
             loopContext->continueJumps.push_back(emitJump(out.code, OpCode::Jump));
             break;
         case StmtType::Expr:
+            if (stmt.expr.type == ExprType::AssignVariable && stmt.expr.right) {
+                const bool loweredAssignRhs = tryLowerBinaryExprToRegWithTempLocals(*stmt.expr.right,
+                                                                                     module,
+                                                                                     locals,
+                                                                                     funcIndex,
+                                                                                     classIndex,
+                                                                                     currentFunctionName,
+                                                                                     out,
+                                                                                     constTempSlots);
+                if (loweredAssignRhs) {
+                    const SymbolLookupResult resolved = resolveSymbol(locals,
+                                                                      module,
+                                                                      funcIndex,
+                                                                      classIndex,
+                                                                      stmt.expr.name);
+                    if (resolved.found) {
+                        emit(out.code,
+                             OpCode::StoreLocalFromReg,
+                             static_cast<std::int32_t>(resolved.localSlot),
+                             0);
+                    } else {
+                        emit(out.code, OpCode::StoreNameFromReg, addString(module, stmt.expr.name), 0);
+                    }
+                    break;
+                }
+            }
+
+            if (stmt.expr.type == ExprType::AssignProperty && stmt.expr.object && stmt.expr.right) {
+                compileExpr(*stmt.expr.object,
+                            module,
+                            locals,
+                            funcIndex,
+                            classIndex,
+                            currentFunctionName,
+                            out.code);
+
+                if (tryLowerBinaryExprToRegWithTempLocals(*stmt.expr.right,
+                                                          module,
+                                                          locals,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          currentFunctionName,
+                                                          out,
+                                                          constTempSlots)) {
+                    emit(out.code, OpCode::PushReg);
+                } else {
+                    compileExpr(*stmt.expr.right,
+                                module,
+                                locals,
+                                funcIndex,
+                                classIndex,
+                                currentFunctionName,
+                                out.code);
+                }
+
+                emit(out.code, OpCode::StoreAttr, addString(module, stmt.expr.propertyName), 0);
+                emit(out.code, OpCode::Pop);
+                break;
+            }
+
+            if (stmt.expr.type == ExprType::AssignIndex && stmt.expr.object && stmt.expr.index && stmt.expr.right) {
+                compileExpr(*stmt.expr.object,
+                            module,
+                            locals,
+                            funcIndex,
+                            classIndex,
+                            currentFunctionName,
+                            out.code);
+                compileExpr(*stmt.expr.index,
+                            module,
+                            locals,
+                            funcIndex,
+                            classIndex,
+                            currentFunctionName,
+                            out.code);
+
+                if (tryLowerBinaryExprToRegWithTempLocals(*stmt.expr.right,
+                                                          module,
+                                                          locals,
+                                                          funcIndex,
+                                                          classIndex,
+                                                          currentFunctionName,
+                                                          out,
+                                                          constTempSlots)) {
+                    emit(out.code, OpCode::PushReg);
+                } else {
+                    compileExpr(*stmt.expr.right,
+                                module,
+                                locals,
+                                funcIndex,
+                                classIndex,
+                                currentFunctionName,
+                                out.code);
+                }
+
+                emit(out.code, OpCode::CallMethod, addString(module, "set"), 2);
+                emit(out.code, OpCode::Pop);
+                break;
+            }
+
+            if (compileCallLikeExprWithLoweredArgs(stmt.expr)) {
+                emit(out.code, OpCode::Pop);
+                break;
+            }
+
             compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
             emit(out.code, OpCode::Pop);
             break;
         case StmtType::Return:
-            compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
+            if (tryLowerBinaryExprToRegWithTempLocals(stmt.expr,
+                                                      module,
+                                                      locals,
+                                                      funcIndex,
+                                                      classIndex,
+                                                      currentFunctionName,
+                                                      out,
+                                                      constTempSlots)) {
+                emit(out.code, OpCode::PushReg);
+            } else {
+                compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code);
+            }
             emit(out.code, OpCode::Return);
             break;
         case StmtType::Sleep:
@@ -1272,6 +2545,7 @@ void compileStatements(const std::vector<Stmt>& statements,
 } // namespace
 
 Module Compiler::compile(const Program& program) {
+    lastFunctionIR_.clear();
     Module module;
     std::unordered_map<std::string, std::size_t> funcIndex;
     std::unordered_map<std::string, std::size_t> classIndex;
@@ -1392,30 +2666,55 @@ Module Compiler::compile(const Program& program) {
     }
 
     for (const auto& fn : program.functions) {
-        FunctionBytecode& out = module.functions[funcIndex.at(fn.name)];
+        const std::size_t functionIndex = funcIndex.at(fn.name);
+        FunctionBytecode& out = module.functions[functionIndex];
         validateScopeLocalRules(fn.body, out.params, fn.name);
+        FunctionIR functionIr;
+        functionIr.name = out.name;
+        functionIr.params = out.params;
+        functionIr.localCount = out.params.size();
         std::unordered_map<std::string, std::size_t> locals;
-        for (std::size_t i = 0; i < out.params.size(); ++i) {
-            locals[out.params[i]] = i;
+        for (std::size_t i = 0; i < functionIr.params.size(); ++i) {
+            locals[functionIr.params[i]] = i;
+        }
+        functionIr.localDebugNames = functionIr.params;
+        std::unordered_map<std::string, std::size_t> constTempSlots;
+        compileStatements(fn.body,
+                          module,
+                          locals,
+                          funcIndex,
+                          classIndex,
+                          fn.name,
+                          false,
+                          functionIr,
+                          nullptr,
+                          constTempSlots);
+
+        if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
+            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+            emit(functionIr.code, OpCode::Return);
         }
 
-        compileStatements(fn.body, module, locals, funcIndex, classIndex, fn.name, false, out, nullptr);
-
-        if (out.code.empty() || out.code.back().op != OpCode::Return) {
-            emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
-            emit(out.code, OpCode::Return);
-        }
+        lastFunctionIR_.push_back(functionIr);
+        module.functions[functionIndex] = lowerFunctionIR(functionIr);
     }
 
     for (const auto& cls : program.classes) {
         for (const auto& method : cls.methods) {
             const std::string mangled = mangleMethodName(cls.name, method.name);
-            FunctionBytecode& out = module.functions[funcIndex.at(mangled)];
+            const std::size_t functionIndex = funcIndex.at(mangled);
+            FunctionBytecode& out = module.functions[functionIndex];
             validateScopeLocalRules(method.body, out.params, cls.name + "::" + method.name);
+            FunctionIR functionIr;
+            functionIr.name = out.name;
+            functionIr.params = out.params;
+            functionIr.localCount = out.params.size();
             std::unordered_map<std::string, std::size_t> locals;
-            for (std::size_t i = 0; i < out.params.size(); ++i) {
-                locals[out.params[i]] = i;
+            for (std::size_t i = 0; i < functionIr.params.size(); ++i) {
+                locals[functionIr.params[i]] = i;
             }
+            functionIr.localDebugNames = functionIr.params;
+            std::unordered_map<std::string, std::size_t> constTempSlots;
 
             compileStatements(method.body,
                               module,
@@ -1424,20 +2723,30 @@ Module Compiler::compile(const Program& program) {
                               classIndex,
                               cls.name + "::" + method.name,
                               false,
-                              out,
-                              nullptr);
+                              functionIr,
+                              nullptr,
+                              constTempSlots);
 
-            if (out.code.empty() || out.code.back().op != OpCode::Return) {
-                emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
-                emit(out.code, OpCode::Return);
+            if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
+                emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+                emit(functionIr.code, OpCode::Return);
             }
+
+            lastFunctionIR_.push_back(functionIr);
+            module.functions[functionIndex] = lowerFunctionIR(functionIr);
         }
     }
 
     {
-        FunctionBytecode& out = module.functions[funcIndex.at(moduleInitName)];
+        const std::size_t functionIndex = funcIndex.at(moduleInitName);
+        FunctionBytecode& out = module.functions[functionIndex];
         validateScopeLocalRules(program.topLevelStatements, {}, moduleInitName);
+        FunctionIR functionIr;
+        functionIr.name = out.name;
+        functionIr.params = out.params;
+        functionIr.localCount = out.localCount;
         std::unordered_map<std::string, std::size_t> locals;
+        std::unordered_map<std::string, std::size_t> constTempSlots;
         compileStatements(program.topLevelStatements,
                           module,
                           locals,
@@ -1445,15 +2754,22 @@ Module Compiler::compile(const Program& program) {
                           classIndex,
                           moduleInitName,
                           true,
-                          out,
-                          nullptr);
-        if (out.code.empty() || out.code.back().op != OpCode::Return) {
-            emit(out.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
-            emit(out.code, OpCode::Return);
+                          functionIr,
+                  nullptr,
+                  constTempSlots);
+        if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
+            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+            emit(functionIr.code, OpCode::Return);
         }
+        lastFunctionIR_.push_back(functionIr);
+        module.functions[functionIndex] = lowerFunctionIR(functionIr);
     }
 
     return module;
+}
+
+const std::vector<FunctionIR>& Compiler::lastFunctionIR() const {
+    return lastFunctionIR_;
 }
 
 Module compileSource(const std::string& source) {
@@ -1555,10 +2871,25 @@ Module compileSourceFile(const std::string& path,
         if (dumpTransformedSource) {
             dumpTransformedSourceFile(path, mergedSource);
         }
-        return compileSource(mergedSource);
+        Tokenizer tokenizer(mergedSource);
+        Parser parser(tokenizer.tokenize());
+        Compiler compiler;
+        Module module = compiler.compile(parser.parseProgram());
+        if (g_compileDisassemblyDumpEnabled) {
+            dumpCompilerDebugFiles(path, module, compiler.lastFunctionIR());
+        }
+        return module;
     } catch (const std::exception& ex) {
         throw std::runtime_error(path + ":" + tryFillFunctionContext(ex.what(), mergedSource));
     }
+}
+
+void setCompileDisassemblyDumpEnabled(bool enabled) {
+    g_compileDisassemblyDumpEnabled = enabled;
+}
+
+bool compileDisassemblyDumpEnabled() {
+    return g_compileDisassemblyDumpEnabled;
 }
 
 std::string serializeModuleText(const Module& module) {
@@ -1582,6 +2913,7 @@ std::string serializeModuleText(const Module& module) {
             out << std::quoted(p) << "\n";
         }
         out << fn.localCount << "\n";
+        out << fn.stackSlotCount << "\n";
         out << fn.code.size() << "\n";
         for (const auto& ins : fn.code) {
             out << static_cast<int>(ins.op) << ' ' << ins.a << ' ' << ins.b << "\n";
@@ -1654,6 +2986,7 @@ Module deserializeModuleText(const std::string& text) {
         }
 
         in >> fn.localCount;
+    in >> fn.stackSlotCount;
 
         std::size_t codeCount = 0;
         in >> codeCount;
@@ -1757,43 +3090,10 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             out << "        f.params.push_back(" << std::quoted(p) << ");\n";
         }
         out << "        f.localCount = " << fn.localCount << ";\n";
+        out << "        f.stackSlotCount = " << fn.stackSlotCount << ";\n";
         for (const auto& ins : fn.code) {
             out << "        f.code.push_back(gs::Instruction{gs::OpCode::";
-            switch (ins.op) {
-            case OpCode::PushConst: out << "PushConst"; break;
-            case OpCode::LoadLocal: out << "LoadLocal"; break;
-            case OpCode::LoadName: out << "LoadName"; break;
-            case OpCode::StoreName: out << "StoreName"; break;
-            case OpCode::StoreLocal: out << "StoreLocal"; break;
-            case OpCode::Add: out << "Add"; break;
-            case OpCode::Sub: out << "Sub"; break;
-            case OpCode::Mul: out << "Mul"; break;
-            case OpCode::Div: out << "Div"; break;
-            case OpCode::LessThan: out << "LessThan"; break;
-            case OpCode::GreaterThan: out << "GreaterThan"; break;
-            case OpCode::Equal: out << "Equal"; break;
-            case OpCode::NotEqual: out << "NotEqual"; break;
-            case OpCode::LessEqual: out << "LessEqual"; break;
-            case OpCode::GreaterEqual: out << "GreaterEqual"; break;
-            case OpCode::Jump: out << "Jump"; break;
-            case OpCode::JumpIfFalse: out << "JumpIfFalse"; break;
-            case OpCode::CallHost: out << "CallHost"; break;
-            case OpCode::CallFunc: out << "CallFunc"; break;
-            case OpCode::NewInstance: out << "NewInstance"; break;
-            case OpCode::LoadAttr: out << "LoadAttr"; break;
-            case OpCode::StoreAttr: out << "StoreAttr"; break;
-            case OpCode::CallMethod: out << "CallMethod"; break;
-            case OpCode::CallValue: out << "CallValue"; break;
-            case OpCode::CallIntrinsic: out << "CallIntrinsic"; break;
-            case OpCode::SpawnFunc: out << "SpawnFunc"; break;
-            case OpCode::Await: out << "Await"; break;
-            case OpCode::MakeList: out << "MakeList"; break;
-            case OpCode::MakeDict: out << "MakeDict"; break;
-            case OpCode::Sleep: out << "Sleep"; break;
-            case OpCode::Yield: out << "Yield"; break;
-            case OpCode::Return: out << "Return"; break;
-            case OpCode::Pop: out << "Pop"; break;
-            }
+            out << opcodeName(ins.op);
             out << ", " << ins.a << ", " << ins.b << "});\n";
         }
         out << "        m.functions.push_back(std::move(f));\n";
