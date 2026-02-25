@@ -16,6 +16,7 @@ option(GS_BUILD_DEMO "Build demo runtime app" ON)
 
 set(GS_LIB_SOURCES
     src/binding.cpp
+    src/bound_class_type.cpp
     src/global.cpp
     src/type_system/type_base.cpp
     src/type_system/list_type.cpp
@@ -39,6 +40,7 @@ set(GS_LIB_SOURCES
 
 set(GS_LIB_HEADERS
     include/gs/binding.hpp
+    include/gs/bound_class_type.hpp
     include/gs/global.hpp
     include/gs/bytecode.hpp
     include/gs/compiler.hpp

@@ -42,12 +42,13 @@ public:
     virtual Value getMember(Object& self, const std::string& member) const;
     virtual Value setMember(Object& self, const std::string& member, const Value& value) const;
     virtual std::string __str__(Object& self, const ValueStrInvoker& valueStr) const;
-
-protected:
+    
+    // Make registration methods public for V2 binding API
     void registerMethodAttribute(const std::string& name, std::size_t argc, MethodInvoker invoker);
     void registerMethodAttribute(const std::string& name, std::size_t argc, SimpleMethodInvoker invoker);
     void registerMemberAttribute(const std::string& name, GetterInvoker getter, SetterInvoker setter);
 
+protected:
     std::unordered_map<std::string, AttributeEntry> attributes_;
 };
 

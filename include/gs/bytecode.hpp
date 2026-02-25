@@ -13,6 +13,7 @@ class Object;
 
 enum class ValueType : std::uint8_t {
     Nil,
+    Bool,
     Int,
     Float,
     String,
@@ -32,6 +33,12 @@ struct Value {
     Value() : type(ValueType::Nil), payload(0) {}
 
     static Value Nil() { return {}; }
+    static Value Bool(bool v) {
+        Value out;
+        out.type = ValueType::Bool;
+        out.payload = v ? 1 : 0;
+        return out;
+    }
     static Value Int(std::int64_t v) {
         Value out;
         out.type = ValueType::Int;
@@ -78,6 +85,7 @@ struct Value {
         return out;
     }
 
+    bool isBool() const { return type == ValueType::Bool; }
     bool isInt() const { return type == ValueType::Int; }
     bool isFloat() const { return type == ValueType::Float; }
     bool isString() const { return type == ValueType::String; }
@@ -86,6 +94,13 @@ struct Value {
     bool isClass() const { return type == ValueType::Class; }
     bool isModule() const { return type == ValueType::Module; }
     bool isNil() const { return type == ValueType::Nil; }
+
+    bool asBool() const {
+        if (!isBool()) {
+            throw std::runtime_error("Value is not boolean");
+        }
+        return payload != 0;
+    }
 
     std::int64_t asInt() const {
         if (!isInt()) {
@@ -142,7 +157,10 @@ struct Value {
 inline std::ostream& operator<<(std::ostream& os, const Value& value) {
     switch (value.type) {
     case ValueType::Nil:
-        os << "nil";
+        os << "null";
+        break;
+    case ValueType::Bool:
+        os << (value.payload ? "true" : "false");
         break;
     case ValueType::Int:
         os << value.payload;

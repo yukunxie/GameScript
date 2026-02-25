@@ -1,4 +1,5 @@
 #include "gs/vm.hpp"
+#include "gs/bound_class_type.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -481,7 +482,9 @@ std::string __str__ValueImpl(const ExecutionContext& context,
                              std::unordered_set<std::uint64_t>& visitingRefs) {
     switch (value.type) {
     case ValueType::Nil:
-        return "nil";
+        return "null";
+    case ValueType::Bool:
+        return value.asBool() ? "true" : "false";
     case ValueType::Int:
         return std::to_string(value.asInt());
     case ValueType::Float: {
@@ -523,8 +526,18 @@ double toDouble(const Value& value) {
 }
 
 std::int64_t toBoolInt(const Value& value) {
+    // Truthiness rules:
+    // - null (Nil) is false
+    // - 0 (Int) is false
+    // - 0.0 (Float) is false
+    // - false (Bool) is false
+    // - All other values are true
+    
     if (value.isNil()) {
         return 0;
+    }
+    if (value.isBool()) {
+        return value.asBool() ? 1 : 0;
     }
     if (value.isInt()) {
         return value.asInt() != 0 ? 1 : 0;
@@ -542,7 +555,9 @@ bool isTruthy(const ExecutionContext& context, const Value& value) {
 std::string typeNameOfValue(const ExecutionContext& context, const Value& value) {
     switch (value.type) {
     case ValueType::Nil:
-        return "nil";
+        return "null";
+    case ValueType::Bool:
+        return "bool";
     case ValueType::Int:
         return "int";
     case ValueType::Float:
@@ -2285,9 +2300,17 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                     }
                 }
 
+                // Set thread-local context for BoundClassType
+                VmHostContext hostContext(*this, context);
+                BoundClassType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().getMember(object, attrName));
+                BoundClassType::setThreadLocalContext(nullptr);
             } else {
+                // Set thread-local context for BoundClassType
+                VmHostContext hostContext(*this, context);
+                BoundClassType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().getMember(object, attrName));
+                BoundClassType::setThreadLocalContext(nullptr);
             }
 load_attr_done:
             break;
@@ -2312,7 +2335,11 @@ load_attr_done:
                 pushRaw(frame.stack, frame.stackTop, normalized);
             } else {
                 rememberWriteBarrier(context, object, normalized);
+                // Set thread-local context for BoundClassType
+                VmHostContext hostContext(*this, context);
+                BoundClassType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().setMember(object, attrName, normalized));
+                BoundClassType::setThreadLocalContext(nullptr);
             }
             break;
         }
@@ -2438,17 +2465,25 @@ load_attr_done:
                     break;
                 }
 
+                // Set thread-local context for BoundClassType
+                VmHostContext hostContext(*this, context);
+                BoundClassType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().callMethod(object,
                                                                   methodName,
                                                                   argScratch,
                                                                   makeString,
                                                                   valueStr));
+                BoundClassType::setThreadLocalContext(nullptr);
             } else {
+                // Set thread-local context for BoundClassType
+                VmHostContext hostContext(*this, context);
+                BoundClassType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().callMethod(object,
                                                                   methodName,
                                                                   argScratch,
                                                                   makeString,
                                                                   valueStr));
+                BoundClassType::setThreadLocalContext(nullptr);
             }
 call_method_done:
             break;

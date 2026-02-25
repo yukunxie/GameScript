@@ -269,6 +269,8 @@ Token Tokenizer::identifierOrKeyword() {
         {"await", TokenType::KeywordAwait}, {"sleep", TokenType::KeywordSleep},
         {"yield", TokenType::KeywordYield},
         {"is", TokenType::KeywordIs},       {"not", TokenType::KeywordNot},
+        {"true", TokenType::KeywordTrue},   {"false", TokenType::KeywordFalse},
+        {"null", TokenType::KeywordNull},
     };
 
     auto it = keywords.find(text);

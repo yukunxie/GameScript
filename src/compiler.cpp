@@ -122,6 +122,7 @@ const char* opcodeName(OpCode op) {
 std::string valueForDis(const Module& module, const Value& value) {
     switch (value.type) {
     case ValueType::Nil:
+    case ValueType::Bool:
     case ValueType::Int:
     case ValueType::Float:
     case ValueType::Ref:
@@ -1263,6 +1264,10 @@ Value evalClassFieldInit(const Expr& expr,
                         const std::unordered_map<std::string, std::size_t>& classIndex,
                         const std::string& scopeName) {
     switch (expr.type) {
+    case ExprType::BoolLiteral:
+        return expr.value;
+    case ExprType::NullLiteral:
+        return Value::Nil();
     case ExprType::Number:
         return expr.value;
     case ExprType::StringLiteral:
@@ -2000,6 +2005,12 @@ void compileExpr(const Expr& expr,
                  std::vector<IRInstruction>& code,
                  const std::unordered_map<std::string, std::size_t>* captureIndexByName) {
     switch (expr.type) {
+    case ExprType::BoolLiteral:
+        emit(code, OpCode::PushConst, addConstant(module, expr.value), 0);
+        return;
+    case ExprType::NullLiteral:
+        emit(code, OpCode::PushConst, addConstant(module, Value::Nil()), 0);
+        return;
     case ExprType::Number:
         emit(code, OpCode::PushConst, addConstant(module, expr.value), 0);
         return;
@@ -2402,7 +2413,7 @@ void compileExpr(const Expr& expr,
                           &lambdaCaptureIndex);
 
         if (lambdaIr.code.empty() || lambdaIr.code.back().op != OpCode::Return) {
-            emit(lambdaIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+            emit(lambdaIr.code, OpCode::PushConst, addConstant(module, Value::Nil()));
             emit(lambdaIr.code, OpCode::Return);
         }
 
@@ -3311,7 +3322,7 @@ Module Compiler::compile(const Program& program) {
                           constTempSlots);
 
         if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
-            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Nil()));
             emit(functionIr.code, OpCode::Return);
         }
 
@@ -3348,7 +3359,7 @@ Module Compiler::compile(const Program& program) {
                               constTempSlots);
 
             if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
-                emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+                emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Nil()));
                 emit(functionIr.code, OpCode::Return);
             }
 
@@ -3378,7 +3389,7 @@ Module Compiler::compile(const Program& program) {
                   nullptr,
                   constTempSlots);
         if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
-            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Int(0)));
+            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Nil()));
             emit(functionIr.code, OpCode::Return);
         }
         lastFunctionIR_.push_back(functionIr);

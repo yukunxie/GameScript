@@ -1,4 +1,5 @@
 #include "gs/runtime.hpp"
+#include "gs/bound_class_type.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -12,271 +13,139 @@
 #include <thread>
 #include <vector>
 
+// ============================================================================
+// TypeConverter for custom types must be defined before use
+// ============================================================================
+
+namespace gs::detail {
+    // Forward declare Vec2
+    struct Vec2;
+}
+
 namespace MyGame
 {
-#define GS_EXPORT_METHOD(NAME, ARGC, FN)                                                                  \
-    registerMethodAttribute(NAME, ARGC, [this](gs::Object& self, const std::vector<gs::Value>& args) { \
-        return FN(self, args);                                                                            \
-    })
-
-#define GS_EXPECT_ARGC(TYPE_NAME, METHOD_NAME, ACTUAL, EXPECTED)                                           \
-    do {                                                                                                     \
-        if ((ACTUAL) != (EXPECTED)) {                                                                        \
-            throw std::runtime_error(std::string(TYPE_NAME) + "." + METHOD_NAME +                          \
-                                     "() argument count mismatch, expected " + std::to_string(EXPECTED));  \
-        }                                                                                                    \
-    } while (0)
-
-#define GS_EXPORT_NUM_MEMBER(NAME, TARGET_EXPR, CASTTYPE)                                                    \
-    registerMemberAttribute(                                                                                  \
-        NAME,                                                                                                 \
-        [this](gs::Object& self) {                                                                            \
-            return gs::Value::Int(static_cast<std::int64_t>(TARGET_EXPR));                                   \
-        },                                                                                                    \
-        [this](gs::Object& self, const gs::Value& value) {                                                   \
-            TARGET_EXPR = static_cast<CASTTYPE>(value.asInt());                                               \
-            return value;                                                                                     \
-        })
-
-#define GS_EXPECT_REF(TYPE_NAME, MEMBER_NAME, VALUE_EXPR)                                                  \
-    do {                                                                                                    \
-        if (!(VALUE_EXPR).isRef()) {                                                                       \
-            throw std::runtime_error(std::string(TYPE_NAME) + "." + MEMBER_NAME +                        \
-                                     " requires object reference");                                        \
-        }                                                                                                   \
-    } while (0)
-
-#define GS_EXPORT_OBJECT_MEMBER(NAME, GET_EXPR, SET_EXPR)                                                   \
-    registerMemberAttribute(                                                                                 \
-        NAME,                                                                                                \
-        [this](gs::Object& self) {                                                                           \
-            return (GET_EXPR);                                                                               \
-        },                                                                                                   \
-        [this](gs::Object& self, const gs::Value& value) {                                                  \
-            SET_EXPR;                                                                                        \
-            return value;                                                                                    \
-        })
-
+    // ========================================================================
+    // C++ Game Types (Plain C++ structs/classes)
+    // ========================================================================
+    
     struct Vec2
     {
+        float x = 0.0f;
+        float y = 0.0f;
+
         Vec2() = default;
-        Vec2(float x, float y)
-            : x(x)
-            , y(y)
-        {
+        Vec2(float x, float y) : x(x), y(y) {}
+
+        // Methods that will be bound to script
+        float length() const {
+            return std::sqrt(x * x + y * y);
         }
-        float x;
-        float y;
+
+        Vec2 normalize() const {
+            const float len = length();
+            if (len > 0.0f) {
+                return Vec2(x / len, y / len);
+            }
+            return Vec2(0.0f, 0.0f);
+        }
+
+        Vec2 add(const Vec2& other) const {
+            return Vec2(x + other.x, y + other.y);
+        }
     };
 
     class Entity
     {
     public:
-       std::string mName;
-       std::uint32_t mHP;
-       std::uint32_t mMP;
-       float mSpeed;
-       Vec2 mPosition;
+        std::string mName;
+        std::uint32_t mHP = 100;
+        std::uint32_t mMP = 50;
+        float mSpeed = 5.0f;
+        Vec2 mPosition;
 
-    public:
-        void GotoPoint(const Vec2& p)
-        {
-            // todo
+        Entity() = default;
+
+        void GotoPoint(const Vec2& p) {
+            mPosition = p;
+            // TODO: actual movement logic
         }
 
-        std::vector<int> GetData()
-        {
+        int GetDataSize() const {
             std::vector<int> data;
-            // todo;
-            return data;
+            // TODO: fill data
+            return static_cast<int>(data.size());
         }
-    };
-    class Vec2Type;
 
-    class Vec2Object : public gs::Object
-    {
-    public:
-        Vec2Object(const gs::Type& typeRef, Vec2 value)
-            : type_(&typeRef), value_(value) {}
-
-        const gs::Type& getType() const override { return *type_; }
-        Vec2& value() { return value_; }
-        const Vec2& value() const { return value_; }
-
-    private:
-        const gs::Type* type_;
-        Vec2 value_;
+        // Accessors for binding
+        Vec2 getPosition() const { return mPosition; }
+        void setPosition(const Vec2& pos) { mPosition = pos; }
     };
 
-    class EntityObject : public gs::Object
-    {
-    public:
-        EntityObject(const gs::Type& typeRef, Entity value, gs::Value positionRef)
-            : type_(&typeRef), value_(std::move(value)), positionRef_(positionRef) {}
-
-        const gs::Type& getType() const override { return *type_; }
-        Entity& value() { return value_; }
-        const Entity& value() const { return value_; }
-        gs::Value positionRef() const { return positionRef_; }
-        void setPositionRef(gs::Value ref) { positionRef_ = ref; }
-
-    private:
-        const gs::Type* type_;
-        Entity value_;
-        gs::Value positionRef_{gs::Value::Nil()};
-    };
-
-    class Vec2Type : public gs::Type
-    {
-    public:
-        Vec2Type()
-        {
-            GS_EXPORT_METHOD("length", 0, methodLength);
-            GS_EXPORT_NUM_MEMBER("x", require(self).value().x, float);
-            GS_EXPORT_NUM_MEMBER("y", require(self).value().y, float);
-        }
-
-        const char* name() const override { return "Vec2"; }
-        std::string __str__(gs::Object& self, const gs::Type::ValueStrInvoker& valueStr) const override
-        {
-            (void)valueStr;
-            auto& vecObj = require(self);
-            const auto& vec = vecObj.value();
-            return "Vec2(" + std::to_string(vec.x) + ", " + std::to_string(vec.y) + ")";
-        }
-
-    private:
-        static Vec2Object& require(gs::Object& self)
-        {
-            auto* out = dynamic_cast<Vec2Object*>(&self);
-            if (!out) {
-                throw std::runtime_error("Target is not Vec2 object");
-            }
-            return *out;
-        }
-
-        gs::Value methodLength(gs::Object& self, const std::vector<gs::Value>& args) const
-        {
-            GS_EXPECT_ARGC("Vec2", "length", args.size(), 0);
-            const auto& vec = require(self).value();
-            const auto len = std::sqrt(static_cast<double>(vec.x * vec.x + vec.y * vec.y));
-            return gs::Value::Int(static_cast<std::int64_t>(len));
-        }
-
-    };
-
-    class EntityType : public gs::Type
-    {
-    public:
-        explicit EntityType(const Vec2Type& vec2Type)
-            : vec2Type_(&vec2Type) {}
-
-        EntityType()
-            : vec2Type_(nullptr)
-        {
-            registerExports();
-        }
-
-        explicit EntityType(const Vec2Type& vec2Type, bool)
-            : vec2Type_(&vec2Type)
-        {
-            registerExports();
-        }
-
-        const char* name() const override { return "Entity"; }
-
-    private:
-        void registerExports()
-        {
-            GS_EXPORT_METHOD("GotoPoint", 1, methodGotoPoint);
-            GS_EXPORT_METHOD("GetData", 0, methodGetData);
-
-            GS_EXPORT_NUM_MEMBER("HP", require(self).value().mHP, std::uint32_t);
-            GS_EXPORT_NUM_MEMBER("MP", require(self).value().mMP, std::uint32_t);
-            GS_EXPORT_NUM_MEMBER("Speed", require(self).value().mSpeed, float);
-            GS_EXPORT_OBJECT_MEMBER("Position",
-                                    require(self).positionRef(),
-                                    GS_EXPECT_REF("Entity", "Position", value);
-                                    require(self).setPositionRef(value));
-        }
-
-        static EntityObject& require(gs::Object& self)
-        {
-            auto* out = dynamic_cast<EntityObject*>(&self);
-            if (!out) {
-                throw std::runtime_error("Target is not Entity object");
-            }
-            return *out;
-        }
-
-        gs::Value methodGotoPoint(gs::Object& self, const std::vector<gs::Value>& args) const
-        {
-            GS_EXPECT_ARGC("Entity", "GotoPoint", args.size(), 1);
-            if (!args[0].isRef()) {
-                throw std::runtime_error("Entity.GotoPoint requires Vec2 object argument");
-            }
-
-            auto& entityObj = require(self);
-            entityObj.setPositionRef(args[0]);
-            entityObj.value().GotoPoint(entityObj.value().mPosition);
-            return gs::Value::Int(0);
-        }
-
-        gs::Value methodGetData(gs::Object& self, const std::vector<gs::Value>& args) const
-        {
-            GS_EXPECT_ARGC("Entity", "GetData", args.size(), 0);
-            auto& entity = require(self).value();
-            return gs::Value::Int(static_cast<std::int64_t>(entity.GetData().size()));
-        }
-
-        const Vec2Type* vec2Type_;
-    };
+    // ========================================================================
+    // Script Binding (New V2 Style - Clean & Simple!)
+    // ========================================================================
 
     class ScriptExports
     {
     public:
-        ScriptExports()
-            : entityType_(vec2Type_, true) {}
-
         void Bind(gs::HostRegistry& host)
         {
-            host.bind("Vec2", [this](gs::HostContext& ctx, const std::vector<gs::Value>& args) -> gs::Value {
-                if (args.size() != 0 && args.size() != 2) {
-                    throw std::runtime_error("Vec2() or Vec2(x, y)");
-                }
-                Vec2 value{0.0f, 0.0f};
-                if (args.size() == 2) {
-                    value.x = static_cast<float>(args[0].asInt());
-                    value.y = static_cast<float>(args[1].asInt());
-                }
-                return ctx.createObject(std::make_unique<Vec2Object>(vec2Type_, value));
-            });
+            std::cout << "[C++] Starting Bind()..." << std::endl;
+            
+            // TODO: Integrate with proper type system
+            // For now, create placeholder types (must be non-const for attribute registration)
+            static gs::BoundClassType vec2Type("Vec2");
+            static gs::BoundClassType entityType("Entity");
+            
+            // Register types with non-const references
+            gs::registerNativeType(typeid(Vec2), vec2Type);
+            gs::registerNativeType(typeid(Entity), entityType);
+            
+            std::cout << "[C++] Types registered" << std::endl;
+            
+            // Create binding context with the new V2 API
+            gs::BindingContext bindings(host);
+            
+            std::cout << "[C++] BindingContext created" << std::endl;
 
-            host.bind("Entity", [this](gs::HostContext& ctx, const std::vector<gs::Value>& args) -> gs::Value {
-                if (!args.empty()) {
-                    throw std::runtime_error("Entity() requires 0 args");
-                }
-                Entity e;
-                e.mName = "Entity";
-                e.mHP = 100;
-                e.mMP = 50;
-                e.mSpeed = 5.0f;
-                e.mPosition = Vec2{0.0f, 0.0f};
-                const auto positionRef = ctx.createObject(std::make_unique<Vec2Object>(vec2Type_, e.mPosition));
-                return ctx.createObject(std::make_unique<EntityObject>(entityType_, std::move(e), positionRef));
+            // ----------------------------------------------------------------
+            // Bind Vec2 (5 lines instead of 120+ lines!)
+            // ----------------------------------------------------------------
+            std::cout << "[C++] Binding Vec2..." << std::endl;
+            {
+                auto binder = bindings.beginClass<Vec2>("Vec2");
+                binder.constructor<Vec2, float, float>();
+                binder.field<Vec2>("x", &Vec2::x);
+                binder.field<Vec2>("y", &Vec2::y);
+                binder.method<Vec2>("length", &Vec2::length);
+                binder.method<Vec2>("normalize", &Vec2::normalize);
+                binder.method<Vec2>("add", &Vec2::add);
+                binder.finalize();
+            }
+            
+            std::cout << "[C++] Binding Entity..." << std::endl;
+            {
+                auto binder = bindings.beginClass<Entity>("Entity");
+                binder.constructor<Entity>();
+                binder.field<Entity>("HP", &Entity::mHP);
+                binder.field<Entity>("MP", &Entity::mMP);
+                binder.field<Entity>("Speed", &Entity::mSpeed);
+                binder.property<Entity>("Position", &Entity::getPosition, &Entity::setPosition);
+                binder.method<Entity>("GotoPoint", &Entity::GotoPoint);
+                binder.method<Entity>("GetDataSize", &Entity::GetDataSize);
+                binder.finalize();
+            }
+
+            std::cout << "[C++] Binding Distance function..." << std::endl;
+            bindings.function("Distance", [](const Vec2& a, const Vec2& b) -> float {
+                const float dx = a.x - b.x;
+                const float dy = a.y - b.y;
+                return std::sqrt(dx * dx + dy * dy);
             });
+            
+            std::cout << "[C++] Bind() completed" << std::endl;
         }
-
-    private:
-        Vec2Type vec2Type_;
-        EntityType entityType_;
     };
-
-#undef GS_EXPECT_ARGC
-#undef GS_EXPORT_OBJECT_MEMBER
-#undef GS_EXPECT_REF
-#undef GS_EXPORT_NUM_MEMBER
-#undef GS_EXPORT_METHOD
 }
 
 namespace {
@@ -313,12 +182,16 @@ void printErrorSourceCaret(const std::string& diagnostic) {
 } // namespace
 
 int main() {
+    std::cout << "[C++] Creating runtime..." << std::endl;
     gs::Runtime runtime;
+    std::cout << "[C++] Runtime created" << std::endl;
+    
     MyGame::ScriptExports exports;
-
+    std::cout << "[C++] Calling Bind()..." << std::endl;
     exports.Bind(runtime.host());
+    std::cout << "[C++] Bind() returned" << std::endl;
 
-    const std::string scriptName = "demo.gs";
+    const std::string scriptName = "test_binding.gs";
     const std::vector<std::string> searchPaths = {
         "scripts",
         "../scripts",
@@ -327,7 +200,20 @@ int main() {
         std::string(GS_PROJECT_ROOT) + "/scripts"
     };
 
-    if (!runtime.loadSourceFile(scriptName, searchPaths)) {
+    std::cout << "[C++] Loading script..." << std::endl;
+    
+    bool loaded = false;
+    try {
+        loaded = runtime.loadSourceFile(scriptName, searchPaths);
+    } catch (const std::exception& e) {
+        std::cerr << "[C++] Exception during loadSourceFile: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "[C++] Unknown exception during loadSourceFile" << std::endl;
+        return 1;
+    }
+    
+    if (!loaded) {
         std::cerr << "Load source failed: " << scriptName;
         if (!runtime.lastError().empty()) {
             std::cerr << "\n" << runtime.lastError();
@@ -337,6 +223,9 @@ int main() {
         std::cerr << '\n';
         return 1;
     }
+    
+    std::cout << "[C++] Script loaded successfully!" << std::endl;
+    std::cout << "[C++] Calling main()..." << std::endl;
 
     const auto result = runtime.call("main");
     std::cout << "main() -> " << result << '\n';

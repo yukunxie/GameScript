@@ -14,6 +14,8 @@ struct FunctionDecl;
 
 enum class ExprType {
     Number,
+    BoolLiteral,
+    NullLiteral,
     StringLiteral,
     Variable,
     Unary,

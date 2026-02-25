@@ -1,26 +1,43 @@
 #include "gs/binding.hpp"
-#include "gs/type_system.hpp"
+#include "gs/bound_class_type.hpp"
+#include "gs/global.hpp"
+#include "gs/type_system/module_type.hpp"
+#include "gs/type_system/native_function_type.hpp"
+#include "gs/type_system/type_base.hpp"
 
 #include <stdexcept>
+#include <typeindex>
 
 namespace gs {
 
-HostRegistry::HostRegistry() {
-    defineModule("system");
-    defineModule("os");
-    defineModule("math");
-    defineModule("regex");
-    defineModule("network");
+// ============================================================================
+// Global Type Registry for Custom Native Types
+// ============================================================================
 
-    bindModuleFunction("system",
-                       "gc",
-                       [](HostContext& context, const std::vector<Value>& args) -> Value {
-                           const std::int64_t generation = args.empty() ? 1 : args[0].asInt();
-                           if (args.size() > 1) {
-                               throw std::runtime_error("system.gc() accepts zero or one argument");
-                           }
-                           return context.collectGarbage(generation);
-                       });
+namespace {
+    // Map from std::type_index to dynamically allocated Type*
+    // This allows TypeConverter<T>::toValue to find the correct Type for wrapping
+    std::unordered_map<std::type_index, const Type*> g_nativeTypeRegistry;
+}
+
+void registerNativeType(const std::type_info& typeInfo, const Type& type) {
+    g_nativeTypeRegistry[std::type_index(typeInfo)] = &type;
+}
+
+const Type* getNativeType(const std::type_info& typeInfo) {
+    auto it = g_nativeTypeRegistry.find(std::type_index(typeInfo));
+    if (it == g_nativeTypeRegistry.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+// ============================================================================
+// HostRegistry Implementation
+// ============================================================================
+
+HostRegistry::HostRegistry() {
+    bindGlobalModule(*this);
 }
 
 void HostRegistry::bind(const std::string& name, HostFunction fn) {
@@ -113,6 +130,76 @@ Value HostRegistry::resolveBuiltin(const std::string& name,
                                                                                                              callback));
     }
     return context.createObject(std::move(moduleObject));
+}
+
+// ============================================================================
+// V2 API Implementation
+// ============================================================================
+
+// ClassBinder implementation
+ClassBinder::ClassBinder(BindingContext& ctx, const std::string& className)
+    : ctx_(ctx), className_(className) {}
+
+ClassBinder::ClassBinder(ClassBinder&& other) noexcept
+    : ctx_(other.ctx_),
+      className_(std::move(other.className_)),
+      constructorFunc_(std::move(other.constructorFunc_)),
+      methods_(std::move(other.methods_)),
+      propertyGetters_(std::move(other.propertyGetters_)),
+      propertySetters_(std::move(other.propertySetters_)) {
+    // Transferred ownership, prevent the moved-from object from registering
+    other.constructorFunc_ = nullptr;
+}
+
+ClassBinder::~ClassBinder() {
+    // Nothing to do here - registration happens immediately now
+}
+
+void ClassBinder::finalize() {
+    // Register constructor as a global function
+    if (constructorFunc_) {
+        ctx_.registry().bind(className_, constructorFunc_);
+        constructorFunc_ = nullptr;  // Prevent double-registration
+    }
+    
+    // Register members and methods to BoundClassType
+    if (typePtr_) {
+        auto* boundType = dynamic_cast<BoundClassType*>(typePtr_);
+        if (boundType) {
+            // Register field getters
+            for (const auto& [name, getter] : propertyGetters_) {
+                boundType->registerGetter(name, getter);
+            }
+            
+            // Register field setters
+            for (const auto& [name, setter] : propertySetters_) {
+                boundType->registerSetter(name, setter);
+            }
+            
+            // Register methods
+            for (const auto& [name, method] : methods_) {
+                boundType->registerMethod(name, method);
+            }
+        }
+    }
+}
+
+// BindingContext implementation
+BindingContext::BindingContext(HostRegistry& registry)
+    : registry_(registry) {}
+
+// ScriptCallableInvoker implementation
+ScriptCallableInvoker::ScriptCallableInvoker(HostContext& ctx, const Value& callable)
+    : ctx_(ctx), callable_(callable) {
+    if (callable_.isNil()) {
+        throw std::runtime_error("Cannot create invoker for nil value");
+    }
+}
+
+Value ScriptCallableInvoker::invokeInternal(const std::vector<Value>& args) {
+    // TODO: Integrate with VM to actually call script functions
+    // For now, this is a placeholder that needs VM integration
+    throw std::runtime_error("ScriptCallableInvoker::invokeInternal not yet implemented - needs VM integration");
 }
 
 } // namespace gs

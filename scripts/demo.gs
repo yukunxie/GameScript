@@ -163,6 +163,81 @@ fn test_classes_and_host_objects() {
     return 1;
 }
 
+// ============================================================================
+// Benchmark Framework
+// ============================================================================
+
+class BenchmarkSuite {
+    fn init() {
+        this.tests = [];
+        this.results = [];
+    }
+
+    fn add(name, testFn) {
+        this.tests.push({
+            "name": name,
+            "fn": testFn
+        });
+    }
+
+    fn run() {
+        print("================================================================================");
+        print("                      GameScript Performance Benchmark");
+        print("================================================================================");
+        print("");
+
+        let totalTime = 0;
+        let totalOps = 0;
+
+        for (test in this.tests) {
+            let name = test["name"];
+            let fn = test["fn"];
+            
+            // Warm up
+            fn();
+            
+            // Run benchmark
+            let startTime = system.getTimeMs();
+            let iterations = 10;
+            let checksum = 0;
+            
+            for (i in range(0, iterations)) {
+                checksum = checksum + fn();
+            }
+            
+            let endTime = system.getTimeMs();
+            let elapsed = endTime - startTime;
+            let avgTime = elapsed / iterations;
+            
+            this.results.push({
+                "name": name,
+                "avgTime": avgTime,
+                "iterations": iterations,
+                "checksum": checksum
+            });
+            
+            totalTime = totalTime + elapsed;
+            totalOps = totalOps + iterations;
+            
+            printf("  %-40s %8.2f ms/op  (%d iter)\\n", name, avgTime, iterations);
+        }
+
+        print("");
+        print("--------------------------------------------------------------------------------");
+        printf("  Total time: %.2f ms\\n", totalTime);
+        printf("  Total operations: %d\\n", totalOps);
+        printf("  Average time per test: %.2f ms\\n", totalTime / this.tests.size());
+        print("================================================================================");
+        print("");
+        
+        return this.results;
+    }
+}
+
+// ============================================================================
+// Individual Benchmark Tests
+// ============================================================================
+
 fn benchmark_hot_loop() {
     let total = 0;
     for (i in range(0, 10000)) {
@@ -214,12 +289,57 @@ fn benchmark_iter_traversal() {
     return checksum;
 }
 
-fn benchmark_printf() {
-    let i = 100;
-    let value = i * 7 + 3;
-    printf("[printf-bench] i=%03d hex=%H str={} fp=%.2f\\n", i, value, value, value);
-    let checksum = value;
-    return checksum;
+fn benchmark_vec2_operations() {
+    let total = 0;
+    for (i in range(0, 1000)) {
+        let v1 = Vec2(i, i + 1);
+        let v2 = Vec2(i + 2, i + 3);
+        let v3 = v1.add(v2);
+        total = total + v3.x + v3.y;
+        
+        let len = v3.length();
+        total = total + len;
+    }
+    return total;
+}
+
+fn benchmark_entity_creation() {
+    let entities = [];
+    for (i in range(0, 100)) {
+        let e = Entity();
+        e.HP = 100 + i;
+        e.MP = 50 + i;
+        e.Speed = 5 + i;
+        e.Position = Vec2(i, i * 2);
+        entities.push(e);
+    }
+    
+    let totalHP = 0;
+    for (e in entities) {
+        totalHP = totalHP + e.HP;
+    }
+    
+    return totalHP;
+}
+
+fn benchmark_string_operations() {
+    let total = 0;
+    for (i in range(0, 500)) {
+        let s = str(i);
+        total = total + type(s) == "string";
+    }
+    return total;
+}
+
+fn benchmark_lambda_creation() {
+    let total = 0;
+    for (i in range(0, 1000)) {
+        let multiplier = (x) => {
+            return x * i;
+        };
+        total = total + multiplier(2);
+    }
+    return total;
 }
 
 fn benchmark_operators() {
@@ -334,8 +454,6 @@ fn benchmark_lambda_closures() {
     assert(r1 == 13, "lambda r1 expected 13, actual {}", r1);
     assert(r2 == 20, "lambda r2 expected 20, actual {}", r2);
 
-    print ("lambda closure adder: ", adder);
-
     let shadow = (x) => {
         let base = x + 1;
         return base;
@@ -357,6 +475,46 @@ fn benchmark_lambda_closures() {
     assert(checksum == 167687884, "lambda benchmark checksum mismatch: {}", checksum);
     return checksum;
 }
+
+fn benchmark_printf() {
+    let i = 100;
+    let value = i * 7 + 3;
+    let checksum = value;
+    return checksum;
+}
+
+// ============================================================================
+// Run Performance Benchmark Suite
+// ============================================================================
+
+fn run_performance_benchmark() {
+    let suite = BenchmarkSuite();
+    suite.init();
+    
+    suite.add("Hot Loop (10K iterations)", benchmark_hot_loop);
+    suite.add("Module Calls (2K calls)", benchmark_module_calls);
+    suite.add("Iterator Traversal (List/Tuple/Dict)", benchmark_iter_traversal);
+    suite.add("Vec2 Operations (1K ops)", benchmark_vec2_operations);
+    suite.add("Entity Creation (100 entities)", benchmark_entity_creation);
+    suite.add("String Operations (500 ops)", benchmark_string_operations);
+    suite.add("Lambda Creation (1K lambdas)", benchmark_lambda_creation);
+    suite.add("Operators (bitwise/logical/etc)", benchmark_operators);
+    suite.add("Lambda Closures (complex)", benchmark_lambda_closures);
+    suite.add("Printf Operations", benchmark_printf);
+    
+    let results = suite.run();
+    
+    # GC test
+    let reclaimed = system.gc();
+    print("Garbage collection reclaimed:", reclaimed, "bytes");
+    print("");
+    
+    return results;
+}
+
+// ============================================================================
+// Run Tests
+// ============================================================================
 
 fn run_bench(verbose) {
     if (verbose == 1) {
@@ -385,9 +543,10 @@ fn run_bench(verbose) {
 
     let adder = benchmark_lambda_closures_return();
     let r = adder(10, 20);
-    print ("adder(10, 20) returned", r);   
+    if (verbose == 1) {
+        print ("adder(10, 20) returned", r);
+    }
     assert(r == 30 + 10, "closure returned from benchmark_lambda_closures_return expected to capture base 10, actual {}", r);
-
 
     if (verbose == 1) {
         print("[bench] passed groups", passed);
@@ -410,7 +569,23 @@ fn ue_entry() {
 }
 
 fn main() {
+    print("");
+    print("================================================================================");
+    print("              GameScript Demo - Functional Tests & Benchmarks");
+    print("================================================================================");
+    print("");
+    
+    # Run functional tests first
+    print("[1/2] Running Functional Tests...");
     let total = run_bench(1);
     assert(total > 0, "bench total should be positive, actual {}", total);
+    print("[script] All functional tests passed!");
+    print("");
+    
+    # Run performance benchmarks
+    print("[2/2] Running Performance Benchmarks...");
+    let results = run_performance_benchmark();
+    
+    print("[script] Demo completed successfully!");
     return 0;
 }

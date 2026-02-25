@@ -32,6 +32,9 @@ enum class TokenType {
     KeywordYield,
     KeywordIs,
     KeywordNot,
+    KeywordTrue,
+    KeywordFalse,
+    KeywordNull,
 
     LParen,
     RParen,

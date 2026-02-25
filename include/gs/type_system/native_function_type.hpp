@@ -1,11 +1,17 @@
 #pragma once
 
-#include "gs/binding.hpp"
 #include "gs/type_system/type_base.hpp"
+#include "gs/bytecode.hpp"
 
+#include <functional>
 #include <string>
+#include <vector>
 
 namespace gs {
+
+// Forward declarations from binding.hpp
+class HostContext;
+using HostFunction = std::function<Value(HostContext& context, const std::vector<Value>&)>;
 
 class NativeFunctionObject : public Object {
 public:

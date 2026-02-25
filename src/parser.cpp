@@ -845,6 +845,33 @@ Expr Parser::parsePrimary() {
         return parsePostfix(std::move(expr));
     }
 
+    if (match(TokenType::KeywordTrue)) {
+        Expr expr;
+        expr.type = ExprType::BoolLiteral;
+        expr.line = previous().line;
+        expr.column = previous().column;
+        expr.value = Value::Bool(true);
+        return parsePostfix(std::move(expr));
+    }
+
+    if (match(TokenType::KeywordFalse)) {
+        Expr expr;
+        expr.type = ExprType::BoolLiteral;
+        expr.line = previous().line;
+        expr.column = previous().column;
+        expr.value = Value::Bool(false);
+        return parsePostfix(std::move(expr));
+    }
+
+    if (match(TokenType::KeywordNull)) {
+        Expr expr;
+        expr.type = ExprType::NullLiteral;
+        expr.line = previous().line;
+        expr.column = previous().column;
+        expr.value = Value::Nil();
+        return parsePostfix(std::move(expr));
+    }
+
     if (match(TokenType::Number)) {
         Expr expr;
         expr.type = ExprType::Number;
