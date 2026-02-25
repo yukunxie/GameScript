@@ -6,6 +6,7 @@
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
+    { "include": "#constants" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#functions" },
@@ -52,11 +53,27 @@
         }
       ]
     },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.gs",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.gs",
+          "match": "\\bnull\\b"
+        }
+      ]
+    },
     "keywords": {
       "patterns": [
         {
           "name": "keyword.control.gs",
           "match": "\\b(fn|class|extends|let|for|in|if|elif|else|while|break|continue|return|spawn|await|sleep|yield|import|from|as)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.gs",
+          "match": "\\b(is|not|and|or)\\b"
         }
       ]
     },
@@ -79,8 +96,28 @@
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.gs",
-          "match": "==|!=|<=|>=|=|<|>|\\+|-|\\*|/|\\."
+          "name": "keyword.operator.comparison.gs",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.gs",
+          "match": "&&|\\|\\|"
+        },
+        {
+          "name": "keyword.operator.bitwise.gs",
+          "match": "&|\\||\\^|~|<<|>>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.gs",
+          "match": "\\*\\*|//|\\+|-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.assignment.gs",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.accessor.gs",
+          "match": "\\."
         }
       ]
     }

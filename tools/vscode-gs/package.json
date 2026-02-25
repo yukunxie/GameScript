@@ -2,7 +2,7 @@
   "name": "gs-script-tools",
   "displayName": "GS Script Tools",
   "description": "Syntax highlighting and comment helpers for GameScript (.gs)",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "local",
   "engines": {
     "vscode": "^1.85.0"

@@ -4,12 +4,15 @@ VS Code extension for `GameScript` (`.gs`) files.
 
 ## Features
 
-- Syntax highlighting for GameScript keywords, numbers, strings, operators, and comments.
-- Module syntax keyword highlighting for `import`, `from`, and `as`.
-- Comment support via language configuration:
+- **Syntax highlighting** for GameScript keywords, numbers, strings, operators, and comments
+- **Boolean literals**: `true`, `false`
+- **Null literal**: `null`
+- **Operators**: arithmetic (`+`, `-`, `*`, `/`, `//`, `%`, `**`), comparison (`==`, `!=`, `<`, `>`, `<=`, `>=`), logical (`&&`, `||`, `is`, `not`), bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`)
+- **Module syntax** keyword highlighting for `import`, `from`, and `as`
+- **Comment support** via language configuration:
   - Line comments: `#`
   - Block comments: `/* ... */`
-- Command: `GS: Add Line Comment` (`gs.addLineComment`) to add `# ` to selected lines.
+- **Command**: `GS: Add Line Comment` (`gs.addLineComment`) to add `# ` to selected lines
 
 ### Module syntax examples
 
@@ -40,5 +43,15 @@ vsce package
 Then install with:
 
 ```bash
-code --install-extension gs-script-tools-0.0.1.vsix
+code --install-extension gs-script-tools-0.0.2.vsix
 ```
+
+## Version History
+
+### 0.0.2
+- Added `true`, `false`, `null` keyword highlighting
+- Enhanced operator syntax highlighting (arithmetic, bitwise, logical, comparison)
+- Added `is` and `not` keyword support
+
+### 0.0.1
+- Initial release with basic syntax highlighting

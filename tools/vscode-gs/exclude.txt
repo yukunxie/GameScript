@@ -1,0 +1,7 @@
+exclude.txt
+install-dev.bat
+build-and-install.bat
+*.vsix
+.git
+.gitignore
+node_modules
