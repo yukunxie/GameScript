@@ -1,8 +1,4 @@
 
-# build directory README
-
-This directory contains CMake-generated build artifacts, Visual Studio project files, cache, and Debug/Release outputs.
-
 ## Required Environment
 
 - Visual Studio: **VS 2026 (preferred)** — CMake generator: `Visual Studio 18 2026`
@@ -12,7 +8,7 @@ This directory contains CMake-generated build artifacts, Visual Studio project f
 
 ## Quick Build (using CMake Presets)
 
-From the project root, run:
+run:
 
 ```powershell
 # 1) Configure (VS 2026 recommended)
