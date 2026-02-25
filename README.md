@@ -35,7 +35,7 @@ cmake --build --preset vs2022-debug
 
 install vs code extension `*.vsix` in tools\vscode-gs
 
-![syntax-highlight](tools\vscode-gs\Syntax-highlight.png)
+![syntax-highlight](https://github.com/yukunxie/GameScript/raw/main/tools/vscode-gs/Syntax-highlight.png)
 
 
 ## demo
