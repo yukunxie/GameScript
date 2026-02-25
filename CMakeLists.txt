@@ -91,4 +91,8 @@ if(GS_BUILD_DEMO)
     target_compile_definitions(gs_demo PRIVATE GS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES app/main.cpp)
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gs_demo)
+    
+    add_executable(run_test run_test.cpp)
+    target_link_libraries(run_test PRIVATE gamescript)
+    source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES run_test.cpp)
 endif()

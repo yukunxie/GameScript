@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -532,6 +533,10 @@ std::int64_t toBoolInt(const Value& value) {
         return std::abs(value.asFloat()) > std::numeric_limits<double>::epsilon() ? 1 : 0;
     }
     return 1;
+}
+
+bool isTruthy(const ExecutionContext& context, const Value& value) {
+    return toBoolInt(value) != 0;
 }
 
 std::string typeNameOfValue(const ExecutionContext& context, const Value& value) {
@@ -1500,6 +1505,100 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             frame.stack[frame.stackTop - 1] = Value::Float(toDouble(lhs) / divisor);
             break;
         }
+        case OpCode::FloorDiv: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("FloorDiv expects numeric operands");
+                }
+                const double divisor = toDouble(rhs);
+                if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                    throw std::runtime_error("Division by zero");
+                }
+                writeRegister(0, Value::Int(static_cast<std::int64_t>(std::floor(toDouble(lhs) / divisor))));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("FloorDiv expects numeric operands");
+            }
+            const double divisor = toDouble(rhs);
+            if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                throw std::runtime_error("Division by zero");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(static_cast<std::int64_t>(std::floor(toDouble(lhs) / divisor)));
+            break;
+        }
+        case OpCode::Mod: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (lhs.isInt() && rhs.isInt()) {
+                    if (rhs.asInt() == 0) {
+                        throw std::runtime_error("Modulo by zero");
+                    }
+                    writeRegister(0, Value::Int(lhs.asInt() % rhs.asInt()));
+                } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                    const double divisor = toDouble(rhs);
+                    if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                        throw std::runtime_error("Modulo by zero");
+                    }
+                    writeRegister(0, Value::Float(std::fmod(toDouble(lhs), divisor)));
+                } else {
+                    throw std::runtime_error("Mod expects numeric operands");
+                }
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (lhs.isInt() && rhs.isInt()) {
+                if (rhs.asInt() == 0) {
+                    throw std::runtime_error("Modulo by zero");
+                }
+                frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() % rhs.asInt());
+            } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
+                const double divisor = toDouble(rhs);
+                if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
+                    throw std::runtime_error("Modulo by zero");
+                }
+                frame.stack[frame.stackTop - 1] = Value::Float(std::fmod(toDouble(lhs), divisor));
+            } else {
+                throw std::runtime_error("Mod expects numeric operands");
+            }
+            break;
+        }
+        case OpCode::Pow: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                    throw std::runtime_error("Pow expects numeric operands");
+                }
+                writeRegister(0, Value::Float(std::pow(toDouble(lhs), toDouble(rhs))));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!isNumericValue(lhs) || !isNumericValue(rhs)) {
+                throw std::runtime_error("Pow expects numeric operands");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Float(std::pow(toDouble(lhs), toDouble(rhs)));
+            break;
+        }
         case OpCode::LessThan: {
             if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
                 const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
@@ -1620,6 +1719,365 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             frame.stack[frame.stackTop - 1] = Value::Int(toDouble(lhs) >= toDouble(rhs) ? 1 : 0);
             break;
         }
+        case OpCode::Is: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                // Identity check: same object pointer or same value representation
+                const bool same = (lhs.type == rhs.type && lhs.payload == rhs.payload);
+                writeRegister(0, Value::Int(same ? 1 : 0));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            const bool same = (lhs.type == rhs.type && lhs.payload == rhs.payload);
+            frame.stack[frame.stackTop - 1] = Value::Int(same ? 1 : 0);
+            break;
+        }
+        case OpCode::IsNot: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                const bool same = (lhs.type == rhs.type && lhs.payload == rhs.payload);
+                writeRegister(0, Value::Int(same ? 0 : 1));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            const bool same = (lhs.type == rhs.type && lhs.payload == rhs.payload);
+            frame.stack[frame.stackTop - 1] = Value::Int(same ? 0 : 1);
+            break;
+        }
+        case OpCode::BitwiseAnd: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!lhs.isInt() || !rhs.isInt()) {
+                    throw std::runtime_error("BitwiseAnd expects integer operands");
+                }
+                writeRegister(0, Value::Int(lhs.asInt() & rhs.asInt()));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!lhs.isInt() || !rhs.isInt()) {
+                throw std::runtime_error("BitwiseAnd expects integer operands");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() & rhs.asInt());
+            break;
+        }
+        case OpCode::BitwiseOr: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!lhs.isInt() || !rhs.isInt()) {
+                    throw std::runtime_error("BitwiseOr expects integer operands");
+                }
+                writeRegister(0, Value::Int(lhs.asInt() | rhs.asInt()));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!lhs.isInt() || !rhs.isInt()) {
+                throw std::runtime_error("BitwiseOr expects integer operands");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() | rhs.asInt());
+            break;
+        }
+        case OpCode::BitwiseXor: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!lhs.isInt() || !rhs.isInt()) {
+                    throw std::runtime_error("BitwiseXor expects integer operands");
+                }
+                writeRegister(0, Value::Int(lhs.asInt() ^ rhs.asInt()));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!lhs.isInt() || !rhs.isInt()) {
+                throw std::runtime_error("BitwiseXor expects integer operands");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() ^ rhs.asInt());
+            break;
+        }
+        case OpCode::ShiftLeft: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!lhs.isInt() || !rhs.isInt()) {
+                    throw std::runtime_error("ShiftLeft expects integer operands");
+                }
+                writeRegister(0, Value::Int(lhs.asInt() << rhs.asInt()));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!lhs.isInt() || !rhs.isInt()) {
+                throw std::runtime_error("ShiftLeft expects integer operands");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() << rhs.asInt());
+            break;
+        }
+        case OpCode::ShiftRight: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                if (!lhs.isInt() || !rhs.isInt()) {
+                    throw std::runtime_error("ShiftRight expects integer operands");
+                }
+                writeRegister(0, Value::Int(lhs.asInt() >> rhs.asInt()));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            if (!lhs.isInt() || !rhs.isInt()) {
+                throw std::runtime_error("ShiftRight expects integer operands");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() >> rhs.asInt());
+            break;
+        }
+        case OpCode::LogicalAnd: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                const bool lhsTruthy = isTruthy(context, lhs);
+                const bool rhsTruthy = isTruthy(context, rhs);
+                writeRegister(0, Value::Int((lhsTruthy && rhsTruthy) ? 1 : 0));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            const bool lhsTruthy = isTruthy(context, lhs);
+            const bool rhsTruthy = isTruthy(context, rhs);
+            frame.stack[frame.stackTop - 1] = Value::Int((lhsTruthy && rhsTruthy) ? 1 : 0);
+            break;
+        }
+        case OpCode::LogicalOr: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value lhs = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
+                const bool lhsTruthy = isTruthy(context, lhs);
+                const bool rhsTruthy = isTruthy(context, rhs);
+                writeRegister(0, Value::Int((lhsTruthy || rhsTruthy) ? 1 : 0));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value rhs = frame.stack[frame.stackTop - 1];
+            const Value lhs = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            const bool lhsTruthy = isTruthy(context, lhs);
+            const bool rhsTruthy = isTruthy(context, rhs);
+            frame.stack[frame.stackTop - 1] = Value::Int((lhsTruthy || rhsTruthy) ? 1 : 0);
+            break;
+        }
+        case OpCode::In: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value element = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value container = resolveSlotValue(ins.bSlotType, ins.b);
+                bool found = false;
+                if (container.isRef()) {
+                    Object* obj = container.asRef();
+                    if (auto* list = dynamic_cast<ListObject*>(obj)) {
+                        for (const auto& item : list->data()) {
+                            if (valueEquals(context, element, item)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
+                        if (element.isInt()) {
+                            found = dict->data().contains(element.asInt());
+                        }
+                    } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
+                        for (const auto& item : tuple->data()) {
+                            if (valueEquals(context, element, item)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
+                        const std::string attrName = __str__Value(context, element);
+                        found = inst->fields().contains(attrName);
+                    } else {
+                        throw std::runtime_error("'in' operator expects list, dict, tuple, or object");
+                    }
+                } else if (container.isRef()) {
+                    if (auto* mod = dynamic_cast<ModuleObject*>(container.asRef())) {
+                        const std::string name = __str__Value(context, element);
+                        found = mod->exports().contains(name);
+                    }
+                } else {
+                    throw std::runtime_error("'in' operator expects container type");
+                }
+                writeRegister(0, Value::Int(found ? 1 : 0));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value container = frame.stack[frame.stackTop - 1];
+            const Value element = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            bool found = false;
+            if (container.isRef()) {
+                Object* obj = container.asRef();
+                if (auto* list = dynamic_cast<ListObject*>(obj)) {
+                    for (const auto& item : list->data()) {
+                        if (valueEquals(context, element, item)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
+                    if (element.isInt()) {
+                        found = dict->data().contains(element.asInt());
+                    }
+                } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
+                    for (const auto& item : tuple->data()) {
+                        if (valueEquals(context, element, item)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
+                    const std::string attrName = __str__Value(context, element);
+                    found = inst->fields().contains(attrName);
+                } else {
+                    throw std::runtime_error("'in' operator expects list, dict, tuple, or object");
+                }
+            } else if (container.isRef()) {
+                if (auto* mod = dynamic_cast<ModuleObject*>(container.asRef())) {
+                    const std::string name = __str__Value(context, element);
+                    found = mod->exports().contains(name);
+                }
+            } else {
+                throw std::runtime_error("'in' operator expects container type");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(found ? 1 : 0);
+            break;
+        }
+        case OpCode::NotIn: {
+            if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
+                const Value element = resolveSlotValue(ins.aSlotType, ins.a);
+                const Value container = resolveSlotValue(ins.bSlotType, ins.b);
+                bool found = false;
+                if (container.isRef()) {
+                    Object* obj = container.asRef();
+                    if (auto* list = dynamic_cast<ListObject*>(obj)) {
+                        for (const auto& item : list->data()) {
+                            if (valueEquals(context, element, item)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
+                        if (element.isInt()) {
+                            found = dict->data().contains(element.asInt());
+                        }
+                    } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
+                        for (const auto& item : tuple->data()) {
+                            if (valueEquals(context, element, item)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
+                        const std::string attrName = __str__Value(context, element);
+                        found = inst->fields().contains(attrName);
+                    } else {
+                        throw std::runtime_error("'not in' operator expects list, dict, tuple, or object");
+                    }
+                } else if (container.isRef()) {
+                    if (auto* mod = dynamic_cast<ModuleObject*>(container.asRef())) {
+                        const std::string name = __str__Value(context, element);
+                        found = mod->exports().contains(name);
+                    }
+                } else {
+                    throw std::runtime_error("'not in' operator expects container type");
+                }
+                writeRegister(0, Value::Int(found ? 0 : 1));
+                break;
+            }
+            if (frame.stackTop < 2) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value container = frame.stack[frame.stackTop - 1];
+            const Value element = frame.stack[frame.stackTop - 2];
+            --frame.stackTop;
+            bool found = false;
+            if (container.isRef()) {
+                Object* obj = container.asRef();
+                if (auto* list = dynamic_cast<ListObject*>(obj)) {
+                    for (const auto& item : list->data()) {
+                        if (valueEquals(context, element, item)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
+                    if (element.isInt()) {
+                        found = dict->data().contains(element.asInt());
+                    }
+                } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
+                    for (const auto& item : tuple->data()) {
+                        if (valueEquals(context, element, item)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
+                    const std::string attrName = __str__Value(context, element);
+                    found = inst->fields().contains(attrName);
+                } else {
+                    throw std::runtime_error("'not in' operator expects list, dict, tuple, or object");
+                }
+            } else if (container.isRef()) {
+                if (auto* mod = dynamic_cast<ModuleObject*>(container.asRef())) {
+                    const std::string name = __str__Value(context, element);
+                    found = mod->exports().contains(name);
+                }
+            } else {
+                throw std::runtime_error("'not in' operator expects container type");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(found ? 0 : 1);
+            break;
+        }
         case OpCode::Negate: {
             if (ins.aSlotType != SlotType::None) {
                 const Value operand = resolveSlotValue(ins.aSlotType, ins.a);
@@ -1656,6 +2114,25 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             }
             const Value operand = frame.stack[frame.stackTop - 1];
             frame.stack[frame.stackTop - 1] = Value::Int(toBoolInt(operand) == 0 ? 1 : 0);
+            break;
+        }
+        case OpCode::BitwiseNot: {
+            if (ins.aSlotType != SlotType::None) {
+                const Value operand = resolveSlotValue(ins.aSlotType, ins.a);
+                if (!operand.isInt()) {
+                    throw std::runtime_error("BitwiseNot expects integer operand");
+                }
+                writeRegister(0, Value::Int(~operand.asInt()));
+                break;
+            }
+            if (frame.stackTop == 0) {
+                throw std::runtime_error("Stack underflow");
+            }
+            const Value operand = frame.stack[frame.stackTop - 1];
+            if (!operand.isInt()) {
+                throw std::runtime_error("BitwiseNot expects integer operand");
+            }
+            frame.stack[frame.stackTop - 1] = Value::Int(~operand.asInt());
             break;
         }
         case OpCode::Jump:

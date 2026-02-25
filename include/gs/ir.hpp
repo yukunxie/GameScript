@@ -54,12 +54,26 @@ inline int stackDelta(const IRInstruction& instruction) {
     case OpCode::Sub:
     case OpCode::Mul:
     case OpCode::Div:
+    case OpCode::FloorDiv:
+    case OpCode::Mod:
+    case OpCode::Pow:
     case OpCode::LessThan:
     case OpCode::GreaterThan:
     case OpCode::Equal:
     case OpCode::NotEqual:
     case OpCode::LessEqual:
     case OpCode::GreaterEqual:
+    case OpCode::Is:
+    case OpCode::IsNot:
+    case OpCode::BitwiseAnd:
+    case OpCode::BitwiseOr:
+    case OpCode::BitwiseXor:
+    case OpCode::ShiftLeft:
+    case OpCode::ShiftRight:
+    case OpCode::LogicalAnd:
+    case OpCode::LogicalOr:
+    case OpCode::In:
+    case OpCode::NotIn:
         if (instruction.aSlotType != SlotType::None || instruction.bSlotType != SlotType::None) {
             return 0;
         }
@@ -68,6 +82,7 @@ inline int stackDelta(const IRInstruction& instruction) {
         return -1;
     case OpCode::Negate:
     case OpCode::Not:
+    case OpCode::BitwiseNot:
         return 0;
     case OpCode::Jump:
     case OpCode::Sleep:

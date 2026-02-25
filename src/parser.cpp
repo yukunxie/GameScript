@@ -432,7 +432,7 @@ Expr Parser::parseExpression() {
 }
 
 Expr Parser::parseAssignment() {
-    Expr lhs = parseEquality();
+    Expr lhs = parseLogicalOr();
     if (!match(TokenType::Equal)) {
         return lhs;
     }
@@ -473,11 +473,11 @@ Expr Parser::parseAssignment() {
     throw std::runtime_error(formatParseError("Only variable/property/index assignment is supported", peek()));
 }
 
-Expr Parser::parseEquality() {
-    Expr expr = parseComparison();
-    while (match(TokenType::EqualEqual) || match(TokenType::BangEqual)) {
+Expr Parser::parseLogicalOr() {
+    Expr expr = parseLogicalAnd();
+    while (match(TokenType::PipePipe)) {
         const TokenType op = previous().type;
-        Expr rhs = parseComparison();
+        Expr rhs = parseLogicalAnd();
 
         Expr merged;
         merged.type = ExprType::Binary;
@@ -491,10 +491,203 @@ Expr Parser::parseEquality() {
     return expr;
 }
 
+Expr Parser::parseLogicalAnd() {
+    Expr expr = parseBitwiseOr();
+    while (match(TokenType::AmpAmp)) {
+        const TokenType op = previous().type;
+        Expr rhs = parseBitwiseOr();
+
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        expr = std::move(merged);
+    }
+    return expr;
+}
+
+Expr Parser::parseBitwiseOr() {
+    Expr expr = parseBitwiseXor();
+    while (match(TokenType::Pipe)) {
+        const TokenType op = previous().type;
+        Expr rhs = parseBitwiseXor();
+
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        expr = std::move(merged);
+    }
+    return expr;
+}
+
+Expr Parser::parseBitwiseXor() {
+    Expr expr = parseBitwiseAnd();
+    while (match(TokenType::Caret)) {
+        const TokenType op = previous().type;
+        Expr rhs = parseBitwiseAnd();
+
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        expr = std::move(merged);
+    }
+    return expr;
+}
+
+Expr Parser::parseBitwiseAnd() {
+    Expr expr = parseEquality();
+    while (match(TokenType::Amp)) {
+        const TokenType op = previous().type;
+        Expr rhs = parseEquality();
+
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        expr = std::move(merged);
+    }
+    return expr;
+}
+
+Expr Parser::parseEquality() {
+    Expr expr = parseComparison();
+    while (true) {
+        TokenType op;
+        if (match(TokenType::EqualEqual) || match(TokenType::BangEqual)) {
+            op = previous().type;
+        } else if (match(TokenType::KeywordIs)) {
+            if (match(TokenType::KeywordNot)) {
+                // "is not" case - we need a special token or handle it as two-token operator
+                op = TokenType::KeywordIs;  // Mark as Is, but we'll handle IsNot in compiler
+                Expr rhs = parseComparison();
+                Expr merged;
+                merged.type = ExprType::Binary;
+                merged.line = expr.line;
+                merged.column = expr.column;
+                merged.binaryOp = TokenType::BangEqual;  // Use a special marker, will map to IsNot
+                merged.left = std::make_unique<Expr>(std::move(expr));
+                merged.right = std::make_unique<Expr>(std::move(rhs));
+                // We need a way to distinguish "is not" from "!=" - let's use a different approach
+                // For now, let's add a comment that this needs special handling
+                // Use unaryOp as a marker for "is not"
+                merged.unaryOp = TokenType::KeywordNot;
+                expr = std::move(merged);
+                continue;
+            } else {
+                op = TokenType::KeywordIs;
+            }
+        } else if (match(TokenType::KeywordNot)) {
+            if (match(TokenType::KeywordIs)) {
+                // "not is" case
+                op = TokenType::KeywordIs;
+                Expr rhs = parseComparison();
+                Expr merged;
+                merged.type = ExprType::Binary;
+                merged.line = expr.line;
+                merged.column = expr.column;
+                merged.binaryOp = TokenType::BangEqual;
+                merged.unaryOp = TokenType::KeywordNot;
+                merged.left = std::make_unique<Expr>(std::move(expr));
+                merged.right = std::make_unique<Expr>(std::move(rhs));
+                expr = std::move(merged);
+                continue;
+            } else {
+                current_--; // Put back 'not'
+                break;
+            }
+        } else {
+            break;
+        }
+        
+        Expr rhs = parseComparison();
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        expr = std::move(merged);
+    }
+    return expr;
+}
+
 Expr Parser::parseComparison() {
-    Expr expr = parseTerm();
+    Expr expr = parseMembership();
     while (match(TokenType::Less) || match(TokenType::LessEqual) ||
            match(TokenType::Greater) || match(TokenType::GreaterEqual)) {
+        const TokenType op = previous().type;
+        Expr rhs = parseMembership();
+
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        expr = std::move(merged);
+    }
+    return expr;
+}
+
+Expr Parser::parseMembership() {
+    Expr expr = parseShift();
+    while (true) {
+        if (match(TokenType::KeywordIn)) {
+            const TokenType op = TokenType::KeywordIn;
+            Expr rhs = parseShift();
+
+            Expr merged;
+            merged.type = ExprType::Binary;
+            merged.line = expr.line;
+            merged.column = expr.column;
+            merged.binaryOp = op;
+            merged.left = std::make_unique<Expr>(std::move(expr));
+            merged.right = std::make_unique<Expr>(std::move(rhs));
+            expr = std::move(merged);
+        } else if (match(TokenType::KeywordNot)) {
+            if (match(TokenType::KeywordIn)) {
+                // "not in" case
+                Expr rhs = parseShift();
+
+                Expr merged;
+                merged.type = ExprType::Binary;
+                merged.line = expr.line;
+                merged.column = expr.column;
+                merged.binaryOp = TokenType::KeywordIn;
+                merged.unaryOp = TokenType::KeywordNot;  // Mark as "not in"
+                merged.left = std::make_unique<Expr>(std::move(expr));
+                merged.right = std::make_unique<Expr>(std::move(rhs));
+                expr = std::move(merged);
+            } else {
+                current_--; // Put back 'not'
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    return expr;
+}
+
+Expr Parser::parseShift() {
+    Expr expr = parseTerm();
+    while (match(TokenType::ShiftLeft) || match(TokenType::ShiftRight)) {
         const TokenType op = previous().type;
         Expr rhs = parseTerm();
 
@@ -530,7 +723,8 @@ Expr Parser::parseTerm() {
 
 Expr Parser::parseFactor() {
     Expr expr = parseUnary();
-    while (match(TokenType::Star) || match(TokenType::Slash)) {
+    while (match(TokenType::Star) || match(TokenType::Slash) || 
+           match(TokenType::SlashSlash) || match(TokenType::Percent)) {
         const TokenType op = previous().type;
         Expr rhs = parseUnary();
 
@@ -547,7 +741,7 @@ Expr Parser::parseFactor() {
 }
 
 Expr Parser::parseUnary() {
-    if (match(TokenType::Minus) || match(TokenType::Bang)) {
+    if (match(TokenType::Minus) || match(TokenType::Bang) || match(TokenType::Tilde)) {
         const Token op = previous();
         Expr rhs = parseUnary();
 
@@ -560,7 +754,25 @@ Expr Parser::parseUnary() {
         return unary;
     }
 
-    return parsePrimary();
+    return parsePower();
+}
+
+Expr Parser::parsePower() {
+    Expr expr = parsePrimary();
+    if (match(TokenType::StarStar)) {
+        const TokenType op = previous().type;
+        Expr rhs = parsePower();  // Right associative
+
+        Expr merged;
+        merged.type = ExprType::Binary;
+        merged.line = expr.line;
+        merged.column = expr.column;
+        merged.binaryOp = op;
+        merged.left = std::make_unique<Expr>(std::move(expr));
+        merged.right = std::make_unique<Expr>(std::move(rhs));
+        return merged;
+    }
+    return expr;
 }
 
 bool Parser::isLambdaStart() const {

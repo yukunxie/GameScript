@@ -98,6 +98,9 @@ std::vector<Token> Tokenizer::tokenize() {
             if (!isAtEnd() && peek() == '=') {
                 advance();
                 tokens.push_back({TokenType::LessEqual, "<=", line, column});
+            } else if (!isAtEnd() && peek() == '<') {
+                advance();
+                tokens.push_back({TokenType::ShiftLeft, "<<", line, column});
             } else {
                 tokens.push_back({TokenType::Less, "<", line, column});
             }
@@ -106,6 +109,9 @@ std::vector<Token> Tokenizer::tokenize() {
             if (!isAtEnd() && peek() == '=') {
                 advance();
                 tokens.push_back({TokenType::GreaterEqual, ">=", line, column});
+            } else if (!isAtEnd() && peek() == '>') {
+                advance();
+                tokens.push_back({TokenType::ShiftRight, ">>", line, column});
             } else {
                 tokens.push_back({TokenType::Greater, ">", line, column});
             }
@@ -117,10 +123,45 @@ std::vector<Token> Tokenizer::tokenize() {
             tokens.push_back({TokenType::Minus, "-", line, column});
             break;
         case '*':
-            tokens.push_back({TokenType::Star, "*", line, column});
+            if (!isAtEnd() && peek() == '*') {
+                advance();
+                tokens.push_back({TokenType::StarStar, "**", line, column});
+            } else {
+                tokens.push_back({TokenType::Star, "*", line, column});
+            }
             break;
         case '/':
-            tokens.push_back({TokenType::Slash, "/", line, column});
+            if (!isAtEnd() && peek() == '/') {
+                advance();
+                tokens.push_back({TokenType::SlashSlash, "//", line, column});
+            } else {
+                tokens.push_back({TokenType::Slash, "/", line, column});
+            }
+            break;
+        case '%':
+            tokens.push_back({TokenType::Percent, "%", line, column});
+            break;
+        case '&':
+            if (!isAtEnd() && peek() == '&') {
+                advance();
+                tokens.push_back({TokenType::AmpAmp, "&&", line, column});
+            } else {
+                tokens.push_back({TokenType::Amp, "&", line, column});
+            }
+            break;
+        case '|':
+            if (!isAtEnd() && peek() == '|') {
+                advance();
+                tokens.push_back({TokenType::PipePipe, "||", line, column});
+            } else {
+                tokens.push_back({TokenType::Pipe, "|", line, column});
+            }
+            break;
+        case '^':
+            tokens.push_back({TokenType::Caret, "^", line, column});
+            break;
+        case '~':
+            tokens.push_back({TokenType::Tilde, "~", line, column});
             break;
         default:
             throw std::runtime_error(formatTokenizerError("Unexpected character in script source", line, column));
@@ -170,14 +211,8 @@ void Tokenizer::skipWhitespace() {
             }
             continue;
         }
-        if (c == '/' && peekNext() == '/') {
-            advance();
-            advance();
-            while (!isAtEnd() && peek() != '\n') {
-                advance();
-            }
-            continue;
-        }
+        // NOTE: '//' is now the floor division operator, not a comment
+        // Use '#' for single-line comments instead
         if (c == '/' && peekNext() == '*') {
             const std::size_t startLine = line_;
             const std::size_t startColumn = column_;
@@ -233,6 +268,7 @@ Token Tokenizer::identifierOrKeyword() {
         {"spawn", TokenType::KeywordSpawn},
         {"await", TokenType::KeywordAwait}, {"sleep", TokenType::KeywordSleep},
         {"yield", TokenType::KeywordYield},
+        {"is", TokenType::KeywordIs},       {"not", TokenType::KeywordNot},
     };
 
     auto it = keywords.find(text);

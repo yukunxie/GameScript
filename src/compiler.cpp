@@ -59,12 +59,27 @@ const char* opcodeName(OpCode op) {
     case OpCode::Sub: return "Sub";
     case OpCode::Mul: return "Mul";
     case OpCode::Div: return "Div";
+    case OpCode::FloorDiv: return "FloorDiv";
+    case OpCode::Mod: return "Mod";
+    case OpCode::Pow: return "Pow";
     case OpCode::LessThan: return "LessThan";
     case OpCode::GreaterThan: return "GreaterThan";
     case OpCode::Equal: return "Equal";
     case OpCode::NotEqual: return "NotEqual";
     case OpCode::LessEqual: return "LessEqual";
     case OpCode::GreaterEqual: return "GreaterEqual";
+    case OpCode::Is: return "Is";
+    case OpCode::IsNot: return "IsNot";
+    case OpCode::BitwiseAnd: return "BitwiseAnd";
+    case OpCode::BitwiseOr: return "BitwiseOr";
+    case OpCode::BitwiseXor: return "BitwiseXor";
+    case OpCode::BitwiseNot: return "BitwiseNot";
+    case OpCode::ShiftLeft: return "ShiftLeft";
+    case OpCode::ShiftRight: return "ShiftRight";
+    case OpCode::LogicalAnd: return "LogicalAnd";
+    case OpCode::LogicalOr: return "LogicalOr";
+    case OpCode::In: return "In";
+    case OpCode::NotIn: return "NotIn";
     case OpCode::Negate: return "Negate";
     case OpCode::Not: return "Not";
     case OpCode::Jump: return "Jump";
@@ -246,12 +261,26 @@ std::string bytecodeOperandHint(const Module& module, const Instruction& ins, co
     case OpCode::Sub:
     case OpCode::Mul:
     case OpCode::Div:
+    case OpCode::FloorDiv:
+    case OpCode::Mod:
+    case OpCode::Pow:
     case OpCode::LessThan:
     case OpCode::GreaterThan:
     case OpCode::Equal:
     case OpCode::NotEqual:
     case OpCode::LessEqual:
     case OpCode::GreaterEqual:
+    case OpCode::Is:
+    case OpCode::IsNot:
+    case OpCode::BitwiseAnd:
+    case OpCode::BitwiseOr:
+    case OpCode::BitwiseXor:
+    case OpCode::ShiftLeft:
+    case OpCode::ShiftRight:
+    case OpCode::LogicalAnd:
+    case OpCode::LogicalOr:
+    case OpCode::In:
+    case OpCode::NotIn:
         if (ins.aSlotType != SlotType::None || ins.bSlotType != SlotType::None) {
             return formatSlotOperandForDis(module, ins.aSlotType, ins.a, ir) + ", " +
                    formatSlotOperandForDis(module, ins.bSlotType, ins.b, ir) + " -> reg[0]";
@@ -259,6 +288,7 @@ std::string bytecodeOperandHint(const Module& module, const Instruction& ins, co
         return {};
     case OpCode::Negate:
     case OpCode::Not:
+    case OpCode::BitwiseNot:
         if (ins.aSlotType != SlotType::None) {
             return formatSlotOperandForDis(module, ins.aSlotType, ins.a, ir) + " -> reg[0]";
         }
@@ -1482,6 +1512,15 @@ bool tryCompileExprToRegister(const Expr& expr,
         case TokenType::Slash:
             emit(code, OpCode::Div, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
             return true;
+        case TokenType::SlashSlash:
+            emit(code, OpCode::FloorDiv, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::Percent:
+            emit(code, OpCode::Mod, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::StarStar:
+            emit(code, OpCode::Pow, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
         case TokenType::Less:
             emit(code, OpCode::LessThan, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
             return true;
@@ -1492,13 +1531,50 @@ bool tryCompileExprToRegister(const Expr& expr,
             emit(code, OpCode::Equal, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
             return true;
         case TokenType::BangEqual:
-            emit(code, OpCode::NotEqual, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            // Check if this is actually "is not" (unaryOp == KeywordNot is the marker)
+            if (expr.unaryOp == TokenType::KeywordNot) {
+                emit(code, OpCode::IsNot, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            } else {
+                emit(code, OpCode::NotEqual, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            }
             return true;
         case TokenType::LessEqual:
             emit(code, OpCode::LessEqual, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
             return true;
         case TokenType::GreaterEqual:
             emit(code, OpCode::GreaterEqual, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::KeywordIs:
+            emit(code, OpCode::Is, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::Amp:
+            emit(code, OpCode::BitwiseAnd, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::Pipe:
+            emit(code, OpCode::BitwiseOr, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::Caret:
+            emit(code, OpCode::BitwiseXor, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::ShiftLeft:
+            emit(code, OpCode::ShiftLeft, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::ShiftRight:
+            emit(code, OpCode::ShiftRight, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::AmpAmp:
+            emit(code, OpCode::LogicalAnd, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::PipePipe:
+            emit(code, OpCode::LogicalOr, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            return true;
+        case TokenType::KeywordIn:
+            // Check if this is "not in"
+            if (expr.unaryOp == TokenType::KeywordNot) {
+                emit(code, OpCode::NotIn, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            } else {
+                emit(code, OpCode::In, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            }
             return true;
         default:
             return false;
@@ -1515,12 +1591,24 @@ bool tryGetBinaryOp(TokenType token, OpCode& outOp) {
     case TokenType::Minus: outOp = OpCode::Sub; return true;
     case TokenType::Star: outOp = OpCode::Mul; return true;
     case TokenType::Slash: outOp = OpCode::Div; return true;
+    case TokenType::SlashSlash: outOp = OpCode::FloorDiv; return true;
+    case TokenType::Percent: outOp = OpCode::Mod; return true;
+    case TokenType::StarStar: outOp = OpCode::Pow; return true;
     case TokenType::Less: outOp = OpCode::LessThan; return true;
     case TokenType::Greater: outOp = OpCode::GreaterThan; return true;
     case TokenType::EqualEqual: outOp = OpCode::Equal; return true;
     case TokenType::BangEqual: outOp = OpCode::NotEqual; return true;
     case TokenType::LessEqual: outOp = OpCode::LessEqual; return true;
     case TokenType::GreaterEqual: outOp = OpCode::GreaterEqual; return true;
+    case TokenType::KeywordIs: outOp = OpCode::Is; return true;
+    case TokenType::Amp: outOp = OpCode::BitwiseAnd; return true;
+    case TokenType::Pipe: outOp = OpCode::BitwiseOr; return true;
+    case TokenType::Caret: outOp = OpCode::BitwiseXor; return true;
+    case TokenType::ShiftLeft: outOp = OpCode::ShiftLeft; return true;
+    case TokenType::ShiftRight: outOp = OpCode::ShiftRight; return true;
+    case TokenType::AmpAmp: outOp = OpCode::LogicalAnd; return true;
+    case TokenType::PipePipe: outOp = OpCode::LogicalOr; return true;
+    case TokenType::KeywordIn: outOp = OpCode::In; return true;
     default: return false;
     }
 }
@@ -1821,6 +1909,13 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
             if (!tryGetBinaryOp(node.binaryOp, op)) {
                 return false;
             }
+            
+            // Special handling for "not in" and "is not"
+            if (node.binaryOp == TokenType::KeywordIn && node.unaryOp == TokenType::KeywordNot) {
+                op = OpCode::NotIn;
+            } else if (node.binaryOp == TokenType::KeywordIs && node.unaryOp == TokenType::KeywordNot) {
+                op = OpCode::IsNot;
+            }
 
             LoweredValue lhs;
             LoweredValue rhs;
@@ -1949,6 +2044,9 @@ void compileExpr(const Expr& expr,
         case TokenType::Bang:
             emit(code, OpCode::Not);
             break;
+        case TokenType::Tilde:
+            emit(code, OpCode::BitwiseNot);
+            break;
         default:
             throw std::runtime_error(formatCompilerError("Unsupported unary operator",
                                                          currentFunctionName,
@@ -2062,6 +2160,15 @@ void compileExpr(const Expr& expr,
         case TokenType::Slash:
             emit(code, OpCode::Div);
             break;
+        case TokenType::SlashSlash:
+            emit(code, OpCode::FloorDiv);
+            break;
+        case TokenType::Percent:
+            emit(code, OpCode::Mod);
+            break;
+        case TokenType::StarStar:
+            emit(code, OpCode::Pow);
+            break;
         case TokenType::Less:
             emit(code, OpCode::LessThan);
             break;
@@ -2072,13 +2179,50 @@ void compileExpr(const Expr& expr,
             emit(code, OpCode::Equal);
             break;
         case TokenType::BangEqual:
-            emit(code, OpCode::NotEqual);
+            // Check if this is "is not"
+            if (expr.unaryOp == TokenType::KeywordNot) {
+                emit(code, OpCode::IsNot);
+            } else {
+                emit(code, OpCode::NotEqual);
+            }
             break;
         case TokenType::LessEqual:
             emit(code, OpCode::LessEqual);
             break;
         case TokenType::GreaterEqual:
             emit(code, OpCode::GreaterEqual);
+            break;
+        case TokenType::KeywordIs:
+            emit(code, OpCode::Is);
+            break;
+        case TokenType::Amp:
+            emit(code, OpCode::BitwiseAnd);
+            break;
+        case TokenType::Pipe:
+            emit(code, OpCode::BitwiseOr);
+            break;
+        case TokenType::Caret:
+            emit(code, OpCode::BitwiseXor);
+            break;
+        case TokenType::ShiftLeft:
+            emit(code, OpCode::ShiftLeft);
+            break;
+        case TokenType::ShiftRight:
+            emit(code, OpCode::ShiftRight);
+            break;
+        case TokenType::AmpAmp:
+            emit(code, OpCode::LogicalAnd);
+            break;
+        case TokenType::PipePipe:
+            emit(code, OpCode::LogicalOr);
+            break;
+        case TokenType::KeywordIn:
+            // Check if this is "not in"
+            if (expr.unaryOp == TokenType::KeywordNot) {
+                emit(code, OpCode::NotIn);
+            } else {
+                emit(code, OpCode::In);
+            }
             break;
         default:
             throw std::runtime_error(formatCompilerError("Unsupported binary operator",

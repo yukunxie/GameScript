@@ -30,6 +30,8 @@ enum class TokenType {
     KeywordAwait,
     KeywordSleep,
     KeywordYield,
+    KeywordIs,
+    KeywordNot,
 
     LParen,
     RParen,
@@ -53,7 +55,18 @@ enum class TokenType {
     Plus,
     Minus,
     Star,
-    Slash
+    Slash,
+    SlashSlash,
+    Percent,
+    StarStar,
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    ShiftLeft,
+    ShiftRight,
+    AmpAmp,
+    PipePipe
 };
 
 struct Token {

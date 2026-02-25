@@ -222,6 +222,93 @@ fn benchmark_printf() {
     return checksum;
 }
 
+fn benchmark_operators() {
+    # Arithmetic operators: floor division, modulo, power
+    let a = 17;
+    let b = 5;
+    let floorDiv = a // b;
+    assert(floorDiv == 3, "floor division expected 3, actual {}", floorDiv);
+    
+    let modResult = a % b;
+    assert(modResult == 2, "modulo expected 2, actual {}", modResult);
+    
+    let powerResult = 2 ** 10;
+    assert(powerResult == 1024, "power expected 1024, actual {}", powerResult);
+    
+    # Bitwise operators
+    let x = 12;  # 0b1100
+    let y = 5;   # 0b0101
+    
+    let andResult = x & y;
+    assert(andResult == 4, "bitwise AND expected 4, actual {}", andResult);
+    
+    let orResult = x | y;
+    assert(orResult == 13, "bitwise OR expected 13, actual {}", orResult);
+    
+    let xorResult = x ^ y;
+    assert(xorResult == 9, "bitwise XOR expected 9, actual {}", xorResult);
+    
+    let notResult = ~5;
+    assert(notResult == -6, "bitwise NOT expected -6, actual {}", notResult);
+    
+    let leftShift = 3 << 2;
+    assert(leftShift == 12, "left shift expected 12, actual {}", leftShift);
+    
+    let rightShift = 16 >> 2;
+    assert(rightShift == 4, "right shift expected 4, actual {}", rightShift);
+    
+    # Logical operators
+    let logicalAnd = (5 > 3) && (10 < 20);
+    assert(logicalAnd == 1, "logical AND expected 1, actual {}", logicalAnd);
+    
+    let logicalOr = (5 < 3) || (10 < 20);
+    assert(logicalOr == 1, "logical OR expected 1, actual {}", logicalOr);
+    
+    # Identity operators
+    let num1 = 42;
+    let num2 = 42;
+    let isIdentical = num1 is num2;
+    assert(isIdentical == 1, "identity check expected 1, actual {}", isIdentical);
+    
+    # Membership operators
+    let list = [1, 2, 3, 4, 5];
+    let inList = 3 in list;
+    assert(inList == 1, "membership check expected 1, actual {}", inList);
+    
+    let notInList = 10 not in list;
+    assert(notInList == 1, "not in membership expected 1, actual {}", notInList);
+    
+    let dict = {1: 10, 2: 20, 3: 30};
+    let inDict = 2 in dict;
+    assert(inDict == 1, "dict membership expected 1, actual {}", inDict);
+    
+    let tuple = Tuple(7, 8, 9);
+    let inTuple = 8 in tuple;
+    assert(inTuple == 1, "tuple membership expected 1, actual {}", inTuple);
+    
+    # Operator precedence test
+    let precedence = 2 + 3 ** 2;
+    assert(precedence == 11, "precedence expected 11, actual {}", precedence);
+    
+    let complexExpr = 10 + 3 * 2 ** 2 - 4 / 2;
+    assert(complexExpr == 20, "complex expression expected 20, actual {}", complexExpr);
+    
+    # Performance test: heavy operator loop
+    let loopSum = 0;
+    for (i in range(0, 1000)) {
+        loopSum = loopSum + (i % 10) + (i // 10) + ((i & 7) | (i ^ 3));
+    }
+    assert(loopSum == 555000, "operator loop checksum expected 555000, actual {}", loopSum);
+    
+    let checksum = floorDiv + modResult + powerResult + andResult + orResult 
+                 + xorResult + leftShift + rightShift + logicalAnd + logicalOr 
+                 + inList + notInList + inDict + inTuple + precedence 
+                 + complexExpr + loopSum + notResult;
+    assert(checksum == 556102, "operator benchmark checksum expected 556102, actual {}", checksum);
+    
+    return checksum;
+}
+
 fn benchmark_lambda_closures_return()
 {
     let base = 10;
@@ -292,6 +379,7 @@ fn run_bench(verbose) {
     let checksum3 = benchmark_iter_traversal();
     let checksum4 = benchmark_printf();
     let checksum5 = benchmark_lambda_closures();
+    let checksum6 = benchmark_operators();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
@@ -308,12 +396,13 @@ fn run_bench(verbose) {
         print("[bench] checksum3", checksum3);
         print("[bench] checksum4", checksum4);
         print("[bench] checksum5", checksum5);
+        print("[bench] checksum6 (operators)", checksum6);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
     assert(passed == 6, "passed groups expected 6, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + reclaimed;
+    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + reclaimed;
 }
 
 fn ue_entry() {
