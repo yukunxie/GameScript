@@ -1,21 +1,47 @@
 #pragma once
 
 #include "gs/type_system/type_base.hpp"
+#include <functional>
 
 namespace gs {
 
+// Hash functor for Value to use as map key
+struct ValueHash {
+    std::size_t operator()(const Value& v) const {
+        // Combine type and payload for hash
+        std::size_t h = std::hash<std::uint8_t>{}(static_cast<std::uint8_t>(v.type));
+        h ^= std::hash<std::int64_t>{}(v.payload) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+// Equality functor for Value
+struct ValueEqual {
+    bool operator()(const Value& a, const Value& b) const {
+        if (a.type != b.type) return false;
+        if (a.type == ValueType::Ref) {
+            return a.object == b.object;
+        }
+        return a.payload == b.payload;
+    }
+};
+
 class DictObject : public Object {
 public:
+    using MapType = std::unordered_map<Value, Value, ValueHash, ValueEqual>;
+
     explicit DictObject(const Type& typeRef);
-    DictObject(const Type& typeRef, std::unordered_map<std::int64_t, Value> values);
+    DictObject(const Type& typeRef, MapType values);
+    // Legacy constructor for int-keyed dicts (backward compatibility)
+    DictObject(const Type& typeRef, std::unordered_map<std::int64_t, Value> intValues);
 
     const Type& getType() const override;
-    std::unordered_map<std::int64_t, Value>& data();
-    const std::unordered_map<std::int64_t, Value>& data() const;
+    MapType& data();
+    const MapType& data() const;
 
 private:
     const Type* type_;
-    std::unordered_map<std::int64_t, Value> data_;
+    MapType data_;
 };
 
 class DictType : public Type {

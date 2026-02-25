@@ -1,23 +1,33 @@
 #include "gs/type_system/dict_type.hpp"
 
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
 namespace gs {
 
 DictObject::DictObject(const Type& typeRef) : type_(&typeRef) {}
-DictObject::DictObject(const Type& typeRef, std::unordered_map<std::int64_t, Value> values)
+
+DictObject::DictObject(const Type& typeRef, MapType values)
     : type_(&typeRef), data_(std::move(values)) {}
+
+// Legacy constructor for backward compatibility with int keys
+DictObject::DictObject(const Type& typeRef, std::unordered_map<std::int64_t, Value> intValues)
+    : type_(&typeRef) {
+    for (auto& kv : intValues) {
+        data_[Value::Int(kv.first)] = std::move(kv.second);
+    }
+}
 
 const Type& DictObject::getType() const {
     return *type_;
 }
 
-std::unordered_map<std::int64_t, Value>& DictObject::data() {
+DictObject::MapType& DictObject::data() {
     return data_;
 }
 
-const std::unordered_map<std::int64_t, Value>& DictObject::data() const {
+const DictObject::MapType& DictObject::data() const {
     return data_;
 }
 
@@ -78,7 +88,7 @@ std::string DictType::__str__(Object& self, const ValueStrInvoker& valueStr) con
             ss << ", ";
         }
         first = false;
-        ss << kv.first << ": " << valueStr(kv.second);
+        ss << valueStr(kv.first) << ": " << valueStr(kv.second);
     }
     ss << "}";
     return ss.str();
@@ -94,14 +104,14 @@ DictObject& DictType::requireDict(Object& self) {
 
 Value DictType::methodSet(Object& self, const std::vector<Value>& args) const {
     auto& dict = requireDict(self);
-    const auto key = args[0].asInt();
+    const Value& key = args[0];
     dict.data()[key] = args[1];
     return args[1];
 }
 
 Value DictType::methodGet(Object& self, const std::vector<Value>& args) const {
     auto& dict = requireDict(self);
-    const auto key = args[0].asInt();
+    const Value& key = args[0];
     auto it = dict.data().find(key);
     if (it == dict.data().end()) {
         return Value::Nil();
@@ -111,7 +121,7 @@ Value DictType::methodGet(Object& self, const std::vector<Value>& args) const {
 
 Value DictType::methodDel(Object& self, const std::vector<Value>& args) const {
     auto& dict = requireDict(self);
-    const auto key = args[0].asInt();
+    const Value& key = args[0];
     auto it = dict.data().find(key);
     if (it == dict.data().end()) {
         return Value::Nil();
@@ -135,7 +145,7 @@ Value DictType::methodKeyAt(Object& self, const std::vector<Value>& args) const 
     }
     auto it = dict.data().begin();
     std::advance(it, static_cast<std::ptrdiff_t>(index));
-    return Value::Int(it->first);
+    return it->first;
 }
 
 Value DictType::methodValueAt(Object& self, const std::vector<Value>& args) const {

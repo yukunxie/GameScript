@@ -2,6 +2,7 @@
 #include "gs/compiler.hpp"
 #include "gs/type_system.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
@@ -597,9 +598,42 @@ Value impl_Tuple(HostContext& context, const std::vector<Value>& args) {
     return context.createObject(std::make_unique<TupleObject>(tupleType, std::move(values)));
 }
 
+// Helper to create a dummy type instance for a given type name
+const Type& getDummyTypeForName(const std::string& typeName) {
+    // These are dummy type instances just to satisfy TypeObject's constructor
+    // The actual type conversion is handled in TypeObject::convert()
+    static TupleType dummyType;
+    return dummyType;
+}
+
 Value impl_type(HostContext& context, const std::vector<Value>& args) {
     if (args.size() != 1) {
         throw std::runtime_error("type() requires exactly one argument");
+    }
+    
+    const std::string typeName = context.typeName(args[0]);
+    
+    // Map internal type names to canonical type names
+    std::string canonicalName = typeName;
+    if (typeName == "int") {
+        canonicalName = "Int";
+    } else if (typeName == "float") {
+        canonicalName = "Float";
+    } else if (typeName == "bool") {
+        canonicalName = "Bool";
+    } else if (typeName == "string") {
+        canonicalName = "String";
+    } else if (typeName == "null") {
+        canonicalName = "Null";
+    }
+    
+    // Create and return a TypeObject
+    return context.createObject(std::make_unique<TypeObject>(getDummyTypeForName(canonicalName), canonicalName));
+}
+
+Value impl_typename(HostContext& context, const std::vector<Value>& args) {
+    if (args.size() != 1) {
+        throw std::runtime_error("typename() requires exactly one argument");
     }
     return context.createString(context.typeName(args[0]));
 }
@@ -646,6 +680,27 @@ Value impl_assert(HostContext& context, const std::vector<Value>& args) {
 }
 
 // ============================================================================
+// System Module Implementation
+// ============================================================================
+
+Value impl_system_getTimeMs(HostContext& context, const std::vector<Value>& args) {
+    (void)context;
+    (void)args;
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    return Value::Float(static_cast<double>(ms));
+}
+
+Value impl_system_gc(HostContext& context, const std::vector<Value>& args) {
+    // Trigger garbage collection and return bytes reclaimed
+    std::int64_t generation = 1; // Default to major GC
+    if (!args.empty() && args[0].isInt()) {
+        generation = args[0].asInt();
+    }
+    return context.collectGarbage(generation);
+}
+
+// ============================================================================
 // Binding Registration
 // ============================================================================
 
@@ -656,6 +711,15 @@ void bindGlobalModule(HostRegistry& host) {
     
     host.bind("loadModule", [&host](HostContext& ctx, const std::vector<Value>& args) -> Value {
         return impl_loadModule(host, ctx, args);
+    });
+
+    // Register system module
+    host.bindModuleFunction("system", "getTimeMs", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
+        return impl_system_getTimeMs(ctx, args);
+    });
+
+    host.bindModuleFunction("system", "gc", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
+        return impl_system_gc(ctx, args);
     });
 
     host.bind("print", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
@@ -676,6 +740,10 @@ void bindGlobalModule(HostRegistry& host) {
 
     host.bind("type", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
         return impl_type(ctx, args);
+    });
+
+    host.bind("typename", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
+        return impl_typename(ctx, args);
     });
 
     host.bind("id", [](HostContext& ctx, const std::vector<Value>& args) -> Value {

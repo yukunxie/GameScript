@@ -17,6 +17,7 @@ option(GS_BUILD_DEMO "Build demo runtime app" ON)
 set(GS_LIB_SOURCES
     src/binding.cpp
     src/bound_class_type.cpp
+    src/error_logger.cpp
     src/global.cpp
     src/type_system/type_base.cpp
     src/type_system/list_type.cpp
@@ -29,6 +30,7 @@ set(GS_LIB_SOURCES
     src/type_system/module_type.cpp
     src/type_system/script_instance_type.cpp
     src/type_system/upvalue_cell_type.cpp
+    src/type_system/type_object_type.cpp
     src/tokenizer.cpp
     src/parser.cpp
     src/compiler.cpp
@@ -41,6 +43,7 @@ set(GS_LIB_SOURCES
 set(GS_LIB_HEADERS
     include/gs/binding.hpp
     include/gs/bound_class_type.hpp
+    include/gs/error_logger.hpp
     include/gs/global.hpp
     include/gs/bytecode.hpp
     include/gs/compiler.hpp
@@ -63,6 +66,7 @@ set(GS_LIB_HEADERS
     include/gs/type_system/module_type.hpp
     include/gs/type_system/script_instance_type.hpp
     include/gs/type_system/upvalue_cell_type.hpp
+    include/gs/type_system/type_object_type.hpp
     include/gs/vm.hpp
 )
 
@@ -80,6 +84,11 @@ target_compile_definitions(gamescript
     PRIVATE
         GS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
 )
+
+# Link DbgHelp for stack trace capture on Windows
+if(WIN32)
+    target_link_libraries(gamescript PRIVATE dbghelp)
+endif()
 
 if(GS_BUILD_TOOLS)
     add_executable(gsc tools/gsc.cpp)

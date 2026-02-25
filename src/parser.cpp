@@ -1,5 +1,6 @@
 #include "gs/parser.hpp"
 
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -733,6 +734,9 @@ Expr Parser::parseFactor() {
         merged.line = expr.line;
         merged.column = expr.column;
         merged.binaryOp = op;
+        if (op == TokenType::Slash) {
+            std::cerr << "[PARSER DEBUG] Creating Binary division expr with line=" << merged.line << ", column=" << merged.column << std::endl;
+        }
         merged.left = std::make_unique<Expr>(std::move(expr));
         merged.right = std::make_unique<Expr>(std::move(rhs));
         expr = std::move(merged);

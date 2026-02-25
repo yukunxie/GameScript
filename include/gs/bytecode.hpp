@@ -277,6 +277,7 @@ struct Instruction {
     std::int32_t a : 24 = -1;
     SlotType bSlotType = SlotType::None;
     std::int32_t b : 24 = -1;
+    std::size_t line{0};  // Source line number for debugging
 };
 
 struct FunctionBytecode {

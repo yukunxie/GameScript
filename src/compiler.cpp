@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <iostream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -1339,6 +1340,9 @@ void emit(std::vector<IRInstruction>& code,
           std::size_t column = 0,
           SlotType aSlotType = SlotType::None,
           SlotType bSlotType = SlotType::None) {
+    if (op == OpCode::Div) {
+        std::cerr << "[EMIT DEBUG] Emitting Div instruction with line=" << line << ", column=" << column << std::endl;
+    }
     code.push_back({op, aSlotType, a, bSlotType, b, line, column});
 }
 
@@ -1489,9 +1493,11 @@ bool tryCompileExprToRegister(const Expr& expr,
         }
     }
     case ExprType::Binary: {
+        std::cerr << "[DEBUG] tryCompileExprToRegister: Binary expr at line " << expr.line << ", column " << expr.column << std::endl;
         if (!expr.left || !expr.right ||
             expr.left->type != ExprType::Variable ||
             expr.right->type != ExprType::Variable) {
+            std::cerr << "[DEBUG] tryCompileExprToRegister: Binary expr rejected (not variables)" << std::endl;
             return false;
         }
 
@@ -1506,22 +1512,24 @@ bool tryCompileExprToRegister(const Expr& expr,
 
         switch (expr.binaryOp) {
         case TokenType::Plus:
-            emit(code, OpCode::Add, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            emit(code, OpCode::Add, leftSlot, rightSlot, expr.line, expr.column, leftSlotType, rightSlotType);
             return true;
         case TokenType::Minus:
-            emit(code, OpCode::Sub, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            emit(code, OpCode::Sub, leftSlot, rightSlot, expr.line, expr.column, leftSlotType, rightSlotType);
             return true;
         case TokenType::Star:
-            emit(code, OpCode::Mul, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            emit(code, OpCode::Mul, leftSlot, rightSlot, expr.line, expr.column, leftSlotType, rightSlotType);
             return true;
         case TokenType::Slash:
-            emit(code, OpCode::Div, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            // 调试输出
+            std::cerr << "[COMPILER DEBUG] Register-mode division at line " << expr.line << ", column " << expr.column << std::endl;
+            emit(code, OpCode::Div, leftSlot, rightSlot, expr.line, expr.column, leftSlotType, rightSlotType);
             return true;
         case TokenType::SlashSlash:
-            emit(code, OpCode::FloorDiv, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            emit(code, OpCode::FloorDiv, leftSlot, rightSlot, expr.line, expr.column, leftSlotType, rightSlotType);
             return true;
         case TokenType::Percent:
-            emit(code, OpCode::Mod, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
+            emit(code, OpCode::Mod, leftSlot, rightSlot, expr.line, expr.column, leftSlotType, rightSlotType);
             return true;
         case TokenType::StarStar:
             emit(code, OpCode::Pow, leftSlot, rightSlot, 0, 0, leftSlotType, rightSlotType);
@@ -1935,8 +1943,8 @@ bool tryLowerBinaryExprToRegWithTempLocals(const Expr& expr,
                  op,
                  static_cast<std::int32_t>(lhs.slot),
                   static_cast<std::int32_t>(rhs.slot),
-                  0,
-                  0,
+                  node.line,
+                  node.column,
                   lhs.slotType,
                   rhs.slotType);
 
@@ -2160,22 +2168,24 @@ void compileExpr(const Expr& expr,
         compileExpr(*expr.right, module, locals, funcIndex, classIndex, currentFunctionName, code, captureIndexByName);
         switch (expr.binaryOp) {
         case TokenType::Plus:
-            emit(code, OpCode::Add);
+            emit(code, OpCode::Add, 0, 0, expr.line, expr.column);
             break;
         case TokenType::Minus:
-            emit(code, OpCode::Sub);
+            emit(code, OpCode::Sub, 0, 0, expr.line, expr.column);
             break;
         case TokenType::Star:
-            emit(code, OpCode::Mul);
+            emit(code, OpCode::Mul, 0, 0, expr.line, expr.column);
             break;
         case TokenType::Slash:
-            emit(code, OpCode::Div);
+            // 调试输出
+            std::cerr << "[COMPILER DEBUG] Stack-mode division at line " << expr.line << ", column " << expr.column << std::endl;
+            emit(code, OpCode::Div, 0, 0, expr.line, expr.column);
             break;
         case TokenType::SlashSlash:
-            emit(code, OpCode::FloorDiv);
+            emit(code, OpCode::FloorDiv, 0, 0, expr.line, expr.column);
             break;
         case TokenType::Percent:
-            emit(code, OpCode::Mod);
+            emit(code, OpCode::Mod, 0, 0, expr.line, expr.column);
             break;
         case TokenType::StarStar:
             emit(code, OpCode::Pow);
@@ -2273,7 +2283,12 @@ void compileExpr(const Expr& expr,
                     for (const auto& arg : expr.args) {
                         compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code, captureIndexByName);
                     }
-                    emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
+                    emit(code,
+                         OpCode::CallValue,
+                         static_cast<std::int32_t>(expr.args.size()),
+                         0,
+                         expr.line,
+                         expr.column);
                     return;
                 }
             }
@@ -2289,7 +2304,12 @@ void compileExpr(const Expr& expr,
                 for (const auto& arg : expr.args) {
                     compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code, captureIndexByName);
                 }
-                emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
+                emit(code,
+                     OpCode::CallValue,
+                     static_cast<std::int32_t>(expr.args.size()),
+                     0,
+                     expr.line,
+                     expr.column);
                 return;
             }
 
@@ -2297,7 +2317,12 @@ void compileExpr(const Expr& expr,
             for (const auto& arg : expr.args) {
                 compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code, captureIndexByName);
             }
-            emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
+            emit(code,
+                 OpCode::CallValue,
+                 static_cast<std::int32_t>(expr.args.size()),
+                 0,
+                 expr.line,
+                 expr.column);
             return;
         }
 
@@ -2305,7 +2330,12 @@ void compileExpr(const Expr& expr,
         for (const auto& arg : expr.args) {
             compileExpr(arg, module, locals, funcIndex, classIndex, currentFunctionName, code, captureIndexByName);
         }
-        emit(code, OpCode::CallValue, static_cast<std::int32_t>(expr.args.size()), 0);
+        emit(code,
+             OpCode::CallValue,
+             static_cast<std::int32_t>(expr.args.size()),
+             0,
+             expr.line,
+             expr.column);
         return;
     }
     case ExprType::MethodCall:
@@ -2322,7 +2352,9 @@ void compileExpr(const Expr& expr,
         emit(code,
              OpCode::CallMethod,
              addString(module, expr.methodName),
-             static_cast<std::int32_t>(expr.args.size()));
+               static_cast<std::int32_t>(expr.args.size()),
+               expr.line,
+               expr.column);
         return;
     case ExprType::PropertyAccess:
         if (!expr.object) {
@@ -2633,6 +2665,21 @@ void compileStatements(const std::vector<Stmt>& statements,
     };
 
     for (const auto& stmt : statements) {
+        const std::size_t stmtStart = out.code.size();
+        const auto annotateStmtLines = [&]() {
+            if (stmt.line == 0) {
+                return;
+            }
+            for (std::size_t i = stmtStart; i < out.code.size(); ++i) {
+                if (out.code[i].line == 0) {
+                    out.code[i].line = stmt.line;
+                    if (out.code[i].column == 0) {
+                        out.code[i].column = stmt.column;
+                    }
+                }
+            }
+        };
+
         switch (stmt.type) {
         case StmtType::LetExpr: {
             const bool loweredBinaryToReg = tryLowerBinaryExprToRegWithTempLocals(stmt.expr,
@@ -3004,6 +3051,22 @@ void compileStatements(const std::vector<Stmt>& statements,
             loopContext->continueJumps.push_back(emitJump(out.code, OpCode::Jump));
             break;
         case StmtType::Expr:
+        {
+            const std::size_t exprStmtStart = out.code.size();
+            const auto annotateExprStmtLines = [&]() {
+                if (stmt.line == 0) {
+                    return;
+                }
+                for (std::size_t i = exprStmtStart; i < out.code.size(); ++i) {
+                    if (out.code[i].line == 0) {
+                        out.code[i].line = stmt.line;
+                        if (out.code[i].column == 0) {
+                            out.code[i].column = stmt.column;
+                        }
+                    }
+                }
+            };
+
             if (stmt.expr.type == ExprType::AssignVariable && stmt.expr.right) {
                 const bool loweredAssignRhs = tryLowerBinaryExprToRegWithTempLocals(*stmt.expr.right,
                                                                                      module,
@@ -3020,6 +3083,7 @@ void compileStatements(const std::vector<Stmt>& statements,
                         if (captureIt != captureIndexByName->end()) {
                             emit(out.code, OpCode::PushReg);
                             emit(out.code, OpCode::StoreCapture, static_cast<std::int32_t>(captureIt->second), 0);
+                            annotateExprStmtLines();
                             break;
                         }
                     }
@@ -3036,6 +3100,7 @@ void compileStatements(const std::vector<Stmt>& statements,
                     } else {
                         emit(out.code, OpCode::StoreNameFromReg, addString(module, stmt.expr.name), 0);
                     }
+                    annotateExprStmtLines();
                     break;
                 }
             }
@@ -3073,6 +3138,7 @@ void compileStatements(const std::vector<Stmt>& statements,
 
                 emit(out.code, OpCode::StoreAttr, addString(module, stmt.expr.propertyName), 0);
                 emit(out.code, OpCode::Pop);
+                annotateExprStmtLines();
                 break;
             }
 
@@ -3117,17 +3183,21 @@ void compileStatements(const std::vector<Stmt>& statements,
 
                 emit(out.code, OpCode::CallMethod, addString(module, "set"), 2);
                 emit(out.code, OpCode::Pop);
+                annotateExprStmtLines();
                 break;
             }
 
             if (compileCallLikeExprWithLoweredArgs(stmt.expr)) {
                 emit(out.code, OpCode::Pop);
+                annotateExprStmtLines();
                 break;
             }
 
             compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code, captureIndexByName);
             emit(out.code, OpCode::Pop);
+            annotateExprStmtLines();
             break;
+        }
         case StmtType::Return:
             if (tryLowerBinaryExprToRegWithTempLocals(stmt.expr,
                                                       module,
@@ -3155,6 +3225,8 @@ void compileStatements(const std::vector<Stmt>& statements,
                                                          stmt.line,
                                                          stmt.column));
         }
+
+        annotateStmtLines();
     }
 }
 
@@ -3236,6 +3308,40 @@ Module Compiler::compile(const Program& program) {
             module.globals.push_back({stmt.name, Value::Nil()});
             declaredModuleGlobals.insert(stmt.name);
         }
+    }
+
+    std::size_t moduleInitAnchorLine = 0;
+    std::size_t moduleInitAnchorColumn = 0;
+    for (const auto& stmt : program.topLevelStatements) {
+        if (stmt.line > 0) {
+            moduleInitAnchorLine = stmt.line;
+            moduleInitAnchorColumn = stmt.column;
+            break;
+        }
+    }
+    if (moduleInitAnchorLine == 0) {
+        for (const auto& fn : program.functions) {
+            if (fn.line > 0) {
+                moduleInitAnchorLine = fn.line;
+                moduleInitAnchorColumn = fn.column;
+                break;
+            }
+        }
+    }
+    if (moduleInitAnchorLine == 0) {
+        for (const auto& cls : program.classes) {
+            if (cls.line > 0) {
+                moduleInitAnchorLine = cls.line;
+                moduleInitAnchorColumn = cls.column;
+                break;
+            }
+        }
+    }
+    if (moduleInitAnchorLine == 0) {
+        moduleInitAnchorLine = 1;
+    }
+    if (moduleInitAnchorColumn == 0) {
+        moduleInitAnchorColumn = 1;
     }
 
     for (const auto& cls : program.classes) {
@@ -3389,8 +3495,18 @@ Module Compiler::compile(const Program& program) {
                   nullptr,
                   constTempSlots);
         if (functionIr.code.empty() || functionIr.code.back().op != OpCode::Return) {
-            emit(functionIr.code, OpCode::PushConst, addConstant(module, Value::Nil()));
-            emit(functionIr.code, OpCode::Return);
+              emit(functionIr.code,
+                  OpCode::PushConst,
+                  addConstant(module, Value::Nil()),
+                  0,
+                  moduleInitAnchorLine,
+                  moduleInitAnchorColumn);
+              emit(functionIr.code,
+                  OpCode::Return,
+                  0,
+                  0,
+                  moduleInitAnchorLine,
+                  moduleInitAnchorColumn);
         }
         lastFunctionIR_.push_back(functionIr);
         module.functions[functionIndex] = lowerFunctionIR(functionIr);

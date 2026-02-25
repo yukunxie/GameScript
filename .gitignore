@@ -32,3 +32,4 @@ Thumbs.db
 **/.gsdebug/
 *.ir.dis
 *.opcode.dis
+*.log

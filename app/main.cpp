@@ -191,7 +191,7 @@ int main() {
     exports.Bind(runtime.host());
     std::cout << "[C++] Bind() returned" << std::endl;
 
-    const std::string scriptName = "test_binding.gs";
+    const std::string scriptName = "demo.gs";
     const std::vector<std::string> searchPaths = {
         "scripts",
         "../scripts",
@@ -226,9 +226,10 @@ int main() {
     
     std::cout << "[C++] Script loaded successfully!" << std::endl;
     std::cout << "[C++] Calling main()..." << std::endl;
+    std::cout.flush();
 
     const auto result = runtime.call("main");
-    std::cout << "main() -> " << result << '\n';
+    std::cout << "main() -> " << result << std::endl;
 
     // std::cout << "tick() -> " << runtime.call("tick") << '\n';
 

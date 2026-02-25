@@ -1,5 +1,8 @@
 #include "gs/vm.hpp"
 #include "gs/bound_class_type.hpp"
+#include "gs/error_logger.hpp"
+#include "gs/type_system/type_object_type.hpp"
+#include "gs/type_system/dict_type.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -77,6 +80,51 @@ bool tryGetObjectId(const ExecutionContext& context, Object* object, std::uint64
     }
     outId = it->second;
     return true;
+}
+
+std::size_t resolveFrameSourceLine(const Frame& frame) {
+    if (!frame.modulePin) {
+        return 0;
+    }
+
+    const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
+    if (fn.code.empty()) {
+        return 0;
+    }
+
+    const auto tryLineAt = [&](std::size_t index) -> std::size_t {
+        if (index >= fn.code.size()) {
+            return 0;
+        }
+        const std::size_t line = fn.code[index].line;
+        return line > 0 ? line : 0;
+    };
+
+    if (frame.ip > 0) {
+        if (const std::size_t line = tryLineAt(frame.ip - 1); line > 0) {
+            return line;
+        }
+    }
+
+    if (const std::size_t line = tryLineAt(frame.ip); line > 0) {
+        return line;
+    }
+
+    std::size_t index = std::min(frame.ip, fn.code.size());
+    while (index > 0) {
+        --index;
+        if (const std::size_t line = tryLineAt(index); line > 0) {
+            return line;
+        }
+    }
+
+    for (const auto& instruction : fn.code) {
+        if (instruction.line > 0) {
+            return instruction.line;
+        }
+    }
+
+    return 0;
 }
 
 std::size_t countYoungObjects(const ExecutionContext& context) {
@@ -586,6 +634,13 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
 }
 
 Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
+    // Check if the string already exists in the pool (string interning)
+    for (std::size_t i = 0; i < context.stringPool.size(); ++i) {
+        if (context.stringPool[i] == text) {
+            return Value::String(static_cast<std::int64_t>(i));
+        }
+    }
+    // Not found, add to pool
     context.stringPool.push_back(text);
     return Value::String(static_cast<std::int64_t>(context.stringPool.size() - 1));
 }
@@ -1050,7 +1105,7 @@ void VirtualMachine::ensureModuleInitialized(ExecutionContext& context, const st
             pushCallFrame(context, modulePin, moduleInitIndex, {});
             std::size_t guard = 0;
             while (context.frames.size() > baseFrameCount) {
-                if (++guard > 1000000) {
+                if (++guard > 100000000) {
                     throw std::runtime_error("Module initialization did not converge");
                 }
                 (void)execute(context, 1);
@@ -1294,6 +1349,21 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                 const std::size_t callerFrameIndex = context.frames.size() - 1;
                 VmHostContext hostContext(*this, context);
                 const Value result = nativeFunction->invoke(hostContext, invokeArgs);
+                if (callerFrameIndex < context.frames.size()) {
+                    pushRaw(context.frames[callerFrameIndex].stack,
+                            context.frames[callerFrameIndex].stackTop,
+                            result);
+                }
+                return true;
+            }
+
+            if (auto* typeObject = dynamic_cast<TypeObject*>(&callableObject)) {
+                if (invokeArgs.size() != 1) {
+                    throw std::runtime_error("Type constructor requires exactly one argument");
+                }
+                const std::size_t callerFrameIndex = context.frames.size() - 1;
+                VmHostContext hostContext(*this, context);
+                const Value result = typeObject->convert(hostContext, invokeArgs[0]);
                 if (callerFrameIndex < context.frames.size()) {
                     pushRaw(context.frames[callerFrameIndex].stack,
                             context.frames[callerFrameIndex].stackTop,
@@ -1936,9 +2006,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                             }
                         }
                     } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
-                        if (element.isInt()) {
-                            found = dict->data().contains(element.asInt());
-                        }
+                        found = dict->data().contains(element);
                     } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
                         for (const auto& item : tuple->data()) {
                             if (valueEquals(context, element, item)) {
@@ -1980,9 +2048,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                         }
                     }
                 } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
-                    if (element.isInt()) {
-                        found = dict->data().contains(element.asInt());
-                    }
+                    found = dict->data().contains(element);
                 } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
                     for (const auto& item : tuple->data()) {
                         if (valueEquals(context, element, item)) {
@@ -2022,9 +2088,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                             }
                         }
                     } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
-                        if (element.isInt()) {
-                            found = dict->data().contains(element.asInt());
-                        }
+                        found = dict->data().contains(element);
                     } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
                         for (const auto& item : tuple->data()) {
                             if (valueEquals(context, element, item)) {
@@ -2066,9 +2130,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                         }
                     }
                 } else if (auto* dict = dynamic_cast<DictObject*>(obj)) {
-                    if (element.isInt()) {
-                        found = dict->data().contains(element.asInt());
-                    }
+                    found = dict->data().contains(element);
                 } else if (auto* tuple = dynamic_cast<TupleObject*>(obj)) {
                     for (const auto& item : tuple->data()) {
                         if (valueEquals(context, element, item)) {
@@ -2550,11 +2612,11 @@ call_method_done:
             if (frame.stackTop < pairCount * 2) {
                 throw std::runtime_error("Not enough stack values for dict literal");
             }
-            std::unordered_map<std::int64_t, Value> values;
+            DictObject::MapType values;
             for (std::size_t i = 0; i < pairCount; ++i) {
                 const Value value = popRaw(frame.stack, frame.stackTop);
                 const Value key = popRaw(frame.stack, frame.stackTop);
-                values[key.asInt()] = value;
+                values[key] = value;
             }
             pushRaw(frame.stack, frame.stackTop, emplaceObject(context, std::make_unique<DictObject>(dictType_, std::move(values))));
             break;
@@ -2734,14 +2796,49 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
     ExecutionContext ctx;
     ctx.modulePin = module_;
     ctx.stringPool = module_->strings;
-    ensureModuleInitialized(ctx, module_);
-    pushCallFrame(ctx, module_, findFunctionIndex(functionName), args);
+    
+    try {
+        ensureModuleInitialized(ctx, module_);
+        pushCallFrame(ctx, module_, findFunctionIndex(functionName), args);
 
-    while (!execute(ctx, 1000)) {
+        while (!execute(ctx, 1000)) {
+        }
+
+        runDeleteHooks(ctx);
+        return ctx.returnValue;
+    } catch (const std::exception& e) {
+        // Build call stack for logging
+        std::vector<std::string> callStack;
+        for (std::size_t frameIndex = 0; frameIndex < ctx.frames.size(); ++frameIndex) {
+            const auto& frame = ctx.frames[frameIndex];
+            if (frame.modulePin) {
+                const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
+                const std::size_t line = resolveFrameSourceLine(frame);
+                callStack.push_back(fn.name + " (line " + std::to_string(line) + ", ip=" + std::to_string(frame.ip) + ")");
+            }
+        }
+        
+        // Get current function name and line
+        std::string currentFn = ctx.frames.empty() ? functionName : 
+            ctx.frames.back().modulePin->functions.at(ctx.frames.back().functionIndex).name;
+        
+        std::size_t currentLine = 0;
+        if (!ctx.frames.empty()) {
+            const auto& currentFrame = ctx.frames.back();
+            currentLine = resolveFrameSourceLine(currentFrame);
+        }
+        
+        // Log error with VM state
+        ErrorLogger::instance().logVmError(
+            e.what(),
+            currentFn,
+            currentLine,  // 传递行号而不是IP
+            callStack,
+            "runFunction('" + functionName + "')"
+        );
+        
+        throw; // Re-throw the exception
     }
-
-    runDeleteHooks(ctx);
-    return ctx.returnValue;
 }
 
 void VirtualMachine::runDeleteHooks(ExecutionContext& context) {
