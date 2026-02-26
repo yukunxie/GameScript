@@ -1,4 +1,5 @@
 #include "gs/runtime.hpp"
+#include "gs/binding.hpp"
 #include "gs/bound_class_type.hpp"
 
 #include <chrono>
