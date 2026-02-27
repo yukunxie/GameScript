@@ -2,6 +2,7 @@
 #include "gs/compiler.hpp"
 #include "gs/type_system.hpp"
 #include "gs/os_module.hpp"
+#include "gs/string_module.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -725,6 +726,9 @@ void bindGlobalModule(HostRegistry& host) {
 
     // Register os module  
     registerOsModule(host);
+
+    // Register string module
+    registerStringModule(host);
 
     host.bind("print", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
         return impl_print(ctx, args);

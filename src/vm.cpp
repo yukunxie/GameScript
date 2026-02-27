@@ -1,5 +1,6 @@
 #include "gs/vm.hpp"
 #include "gs/bound_class_type.hpp"
+#include "gs/type_system/regex_type.hpp"
 #include "gs/error_logger.hpp"
 #include "gs/type_system/type_object_type.hpp"
 #include "gs/type_system/dict_type.hpp"
@@ -2527,25 +2528,29 @@ load_attr_done:
                     break;
                 }
 
-                // Set thread-local context for BoundClassType
+                // Set thread-local context for BoundClassType and PatternType
                 VmHostContext hostContext(*this, context);
                 BoundClassType::setThreadLocalContext(&hostContext);
+                PatternType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().callMethod(object,
                                                                   methodName,
                                                                   argScratch,
                                                                   makeString,
                                                                   valueStr));
                 BoundClassType::setThreadLocalContext(nullptr);
+                PatternType::setThreadLocalContext(nullptr);
             } else {
-                // Set thread-local context for BoundClassType
+                // Set thread-local context for BoundClassType and PatternType
                 VmHostContext hostContext(*this, context);
                 BoundClassType::setThreadLocalContext(&hostContext);
+                PatternType::setThreadLocalContext(&hostContext);
                 pushRaw(frame.stack, frame.stackTop, object.getType().callMethod(object,
                                                                   methodName,
                                                                   argScratch,
                                                                   makeString,
                                                                   valueStr));
                 BoundClassType::setThreadLocalContext(nullptr);
+                PatternType::setThreadLocalContext(nullptr);
             }
 call_method_done:
             break;
