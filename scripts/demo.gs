@@ -169,15 +169,14 @@ fn test_classes_and_host_objects() {
 
 class BenchmarkSuite {
     fn __new__(self) {
-        self.tests = [];
+        self.testNames = [];
+        self.testFns = [];
         self.results = [];
     }
 
     fn add(self, name, testFn) {
-        self.tests.push({
-            "name": name,
-            "fn": testFn
-        });
+        self.testNames.push(name);
+        self.testFns.push(testFn);
     }
 
     fn run(self) {
@@ -189,9 +188,9 @@ class BenchmarkSuite {
         let totalTime = 0;
         let totalOps = 0;
 
-        for (test in self.tests) {
-            let name = test["name"];
-            let fn_ = test["fn"];
+        for (index in range(0, self.testNames.size())) {
+            let name = self.testNames[index];
+            let fn_ = self.testFns[index];
             
             # Warm up
             fn_();
@@ -226,7 +225,7 @@ class BenchmarkSuite {
         print("--------------------------------------------------------------------------------");
         printf("  Total time: %.2f ms\\n", totalTime);
         printf("  Total operations: %d\\n", totalOps);
-        printf("  Average time per test: %.2f ms\\n", totalTime / self.tests.size());
+        printf("  Average time per test: %.2f ms\\n", totalTime / self.testNames.size());
         print("================================================================================");
         print("");
         
@@ -320,6 +319,44 @@ fn benchmark_string_operations() {
         let s = str(i);
         total = total + (typename(s) == "string");
     }
+    return total;
+}
+
+fn benchmark_string_object_operations() {
+    let total = 0;
+    for (i in range(0, 500)) {
+        let text = "Hello, World!";
+        let containsOk = text.contains("World");
+        let posScore = text.find("World");
+        let upper = text.upper();
+        let lower = text.lower();
+        let sub = text.substr(0, 5);
+        let slice = text.slice(7, 12);
+        let replaced = text.replace("World", "Universe");
+
+        if (containsOk) {
+            total = total + 1;
+        }
+        total = total + posScore;
+
+        if (upper == "HELLO, WORLD!") {
+            total = total + 1;
+        }
+        if (lower == "hello, world!") {
+            total = total + 1;
+        }
+        if (sub == "Hello") {
+            total = total + 1;
+        }
+        if (slice == "World") {
+            total = total + 1;
+        }
+        if (replaced == "Hello, Universe!") {
+            total = total + 1;
+        }
+    }
+
+    assert(total == 6500, "string-object benchmark checksum mismatch: {}", total);
     return total;
 }
 
@@ -531,6 +568,7 @@ fn run_bench(verbose) {
     let checksum4 = benchmark_printf();
     let checksum5 = benchmark_lambda_closures();
     let checksum6 = benchmark_operators();
+    let checksum7 = benchmark_string_object_operations();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
@@ -549,12 +587,13 @@ fn run_bench(verbose) {
         print("[bench] checksum4", checksum4);
         print("[bench] checksum5", checksum5);
         print("[bench] checksum6 (operators)", checksum6);
+        print("[bench] checksum7 (string-object)", checksum7);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
     assert(passed == 6, "passed groups expected 6, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + reclaimed;
+    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + reclaimed;
 }
 
 fn ue_entry() {
