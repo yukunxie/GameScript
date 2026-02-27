@@ -20,6 +20,9 @@ const Type& TypeObject::getType() const {
 }
 
 Value TypeObject::convert(HostContext& context, const Value& value) const {
+    const std::string valueType = context.typeName(value);
+    const bool isStringValue = value.isString() || valueType == "String" || valueType == "string";
+
     // Handle conversion based on type name
     if (typeName_ == "Int") {
         if (value.isInt()) {
@@ -31,7 +34,7 @@ Value TypeObject::convert(HostContext& context, const Value& value) const {
         if (value.isBool()) {
             return Value::Int(value.asBool() ? 1 : 0);
         }
-        if (value.isString()) {
+        if (isStringValue) {
             try {
                 const std::string& str = context.__str__(value);
                 return Value::Int(std::stoll(str));
@@ -55,7 +58,7 @@ Value TypeObject::convert(HostContext& context, const Value& value) const {
         if (value.isBool()) {
             return Value::Float(value.asBool() ? 1.0 : 0.0);
         }
-        if (value.isString()) {
+        if (isStringValue) {
             try {
                 const std::string& str = context.__str__(value);
                 return Value::Float(std::stod(str));

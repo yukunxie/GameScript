@@ -12,10 +12,18 @@ int main(int argc, char** argv) {
         gs::Runtime runtime;
         
         // Load script from current directory
-        std::vector<std::string> searchPaths = {"."};
         std::string scriptName = argv[1];
         
-        if (!runtime.loadSourceFile(scriptName, searchPaths)) {
+        // Check if it's a bytecode file or source file
+        bool success = false;
+        if (scriptName.ends_with(".gsbc")) {
+            success = runtime.loadBytecodeFile(scriptName);
+        } else {
+            std::vector<std::string> searchPaths = {"."};
+            success = runtime.loadSourceFile(scriptName, searchPaths);
+        }
+        
+        if (!success) {
             std::cerr << "Failed to load script: " << scriptName << std::endl;
             if (!runtime.lastError().empty()) {
                 std::cerr << "Error: " << runtime.lastError() << std::endl;

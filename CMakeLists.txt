@@ -34,6 +34,7 @@ set(GS_LIB_SOURCES
     src/type_system/file_type.cpp
     src/type_system/path_type.cpp
     src/type_system/regex_type.cpp
+	src/type_system/string_type.cpp
     src/os_module.cpp
     src/string_module.cpp
     src/tokenizer.cpp
@@ -75,6 +76,7 @@ set(GS_LIB_HEADERS
     include/gs/type_system/file_type.hpp
     include/gs/type_system/path_type.hpp
     include/gs/type_system/regex_type.hpp
+	include/gs/type_system/string_type.hpp
     include/gs/os_module.hpp
     include/gs/string_module.hpp
     include/gs/vm.hpp

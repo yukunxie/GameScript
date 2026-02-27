@@ -60,6 +60,32 @@ const std::string& getString(const ExecutionContext& context, const Value& value
     return context.stringPool[idx];
 }
 
+const StringObject* tryGetStringObject(const ExecutionContext& context, const Value& value) {
+    if (!value.isRef()) {
+        return nullptr;
+    }
+    Object* object = value.asRef();
+    if (!object) {
+        return nullptr;
+    }
+    if (!context.objectPtrToId.contains(object)) {
+        return nullptr;
+    }
+    return dynamic_cast<StringObject*>(object);
+}
+
+bool tryExtractStringData(const ExecutionContext& context, const Value& value, std::string& out) {
+    if (const auto* stringObject = tryGetStringObject(context, value)) {
+        out = stringObject->data();
+        return true;
+    }
+    if (value.isString()) {
+        out = getString(context, value);
+        return true;
+    }
+    return false;
+}
+
 std::string __str__ValueImpl(const ExecutionContext& context,
                              const Value& value,
                              std::unordered_set<std::uint64_t>& visitingRefs);
@@ -510,7 +536,12 @@ std::string __str__RefObject(const ExecutionContext& context,
         return "ref(null)";
     }
 
-    const std::uint64_t objectId = object->objectId();
+    auto idIt = context.objectPtrToId.find(object);
+    if (idIt == context.objectPtrToId.end()) {
+        return "ref(stale)";
+    }
+
+    const std::uint64_t objectId = idIt->second;
 
     if (visitingRefs.contains(objectId)) {
         return "[Circular]";
@@ -529,6 +560,11 @@ std::string __str__RefObject(const ExecutionContext& context,
 std::string __str__ValueImpl(const ExecutionContext& context,
                              const Value& value,
                              std::unordered_set<std::uint64_t>& visitingRefs) {
+    std::string stringData;
+    if (tryExtractStringData(context, value, stringData)) {
+        return stringData;
+    }
+
     switch (value.type) {
     case ValueType::Nil:
         return "null";
@@ -541,8 +577,6 @@ std::string __str__ValueImpl(const ExecutionContext& context,
         out << std::setprecision(17) << value.asFloat();
         return out.str();
     }
-    case ValueType::String:
-        return getString(context, value);
     case ValueType::Ref:
         return __str__RefObject(context, value.asRef(), visitingRefs);
     case ValueType::Function:
@@ -602,6 +636,13 @@ bool isTruthy(const ExecutionContext& context, const Value& value) {
 }
 
 std::string typeNameOfValue(const ExecutionContext& context, const Value& value) {
+    if (tryGetStringObject(context, value)) {
+        return "string";
+    }
+    if (value.isString()) {
+        return "string";
+    }
+
     switch (value.type) {
     case ValueType::Nil:
         return "null";
@@ -611,8 +652,6 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
         return "int";
     case ValueType::Float:
         return "float";
-    case ValueType::String:
-        return "string";
     case ValueType::Function:
         return "function";
     case ValueType::Class:
@@ -627,6 +666,9 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
     if (!object) {
         return "ref";
     }
+    if (!context.objectPtrToId.contains(object)) {
+        return "ref(stale)";
+    }
 
     if (auto* instance = dynamic_cast<ScriptInstanceObject*>(object)) {
         return instance->className();
@@ -635,26 +677,21 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
 }
 
 Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
-    // Check if the string already exists in the pool (string interning)
-    for (std::size_t i = 0; i < context.stringPool.size(); ++i) {
-        if (context.stringPool[i] == text) {
-            return Value::String(static_cast<std::int64_t>(i));
-        }
-    }
-    // Not found, add to pool
-    context.stringPool.push_back(text);
-    return Value::String(static_cast<std::int64_t>(context.stringPool.size() - 1));
+    static StringType runtimeStringType;
+    return emplaceObject(context, std::make_unique<StringObject>(runtimeStringType, text));
 }
 
 bool valueEquals(const ExecutionContext& context, const Value& lhs, const Value& rhs) {
     if (isNumericValue(lhs) && isNumericValue(rhs)) {
         return std::abs(toDouble(lhs) - toDouble(rhs)) <= std::numeric_limits<double>::epsilon();
     }
+    std::string lhsString;
+    std::string rhsString;
+    if (tryExtractStringData(context, lhs, lhsString) && tryExtractStringData(context, rhs, rhsString)) {
+        return lhsString == rhsString;
+    }
     if (lhs.type != rhs.type) {
         return false;
-    }
-    if (lhs.type == ValueType::String) {
-        return getString(context, lhs) == getString(context, rhs);
     }
     if (lhs.type == ValueType::Ref) {
         return lhs.asRef() == rhs.asRef();

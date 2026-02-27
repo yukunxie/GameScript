@@ -109,6 +109,7 @@ private:
     TaskSystem& tasks_;
     ListType listType_;
     DictType dictType_;
+	StringType stringType_;
     FunctionType functionType_;
     LambdaType lambdaType_;
     NativeFunctionType nativeFunctionType_;

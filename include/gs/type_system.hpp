@@ -4,6 +4,7 @@
 #include "gs/type_system/list_type.hpp"
 #include "gs/type_system/tuple_type.hpp"
 #include "gs/type_system/dict_type.hpp"
+#include "gs/type_system/string_type.hpp"
 #include "gs/type_system/script_callable_object.hpp"
 #include "gs/type_system/function_type.hpp"
 #include "gs/type_system/lambda_type.hpp"
