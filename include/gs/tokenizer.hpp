@@ -30,6 +30,7 @@ enum class TokenType {
     KeywordAwait,
     KeywordSleep,
     KeywordYield,
+    KeywordSuper,
     KeywordIs,
     KeywordNot,
     KeywordTrue,

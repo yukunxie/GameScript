@@ -268,6 +268,7 @@ Token Tokenizer::identifierOrKeyword() {
         {"spawn", TokenType::KeywordSpawn},
         {"await", TokenType::KeywordAwait}, {"sleep", TokenType::KeywordSleep},
         {"yield", TokenType::KeywordYield},
+        {"super", TokenType::KeywordSuper},
         {"is", TokenType::KeywordIs},       {"not", TokenType::KeywordNot},
         {"true", TokenType::KeywordTrue},   {"false", TokenType::KeywordFalse},
         {"null", TokenType::KeywordNull},

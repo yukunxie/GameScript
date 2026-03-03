@@ -58,9 +58,12 @@ public:
     virtual const Type& getType() const = 0;
     void setObjectId(std::uint64_t id) { objectId_ = id; }
     std::uint64_t objectId() const { return objectId_; }
+    void setProtoRef(const Value& protoRef) { protoRef_ = protoRef; }
+    const Value& protoRef() const { return protoRef_; }
 
 private:
     std::uint64_t objectId_{0};
+    Value protoRef_{Value::Nil()};
 };
 
 } // namespace gs

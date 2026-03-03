@@ -3348,13 +3348,11 @@ Module Compiler::compile(const Program& program) {
         auto& classBc = module.classes[classIndex.at(cls.name)];
         if (!cls.baseName.empty()) {
             auto it = classIndex.find(cls.baseName);
-            if (it == classIndex.end()) {
-                throw std::runtime_error(formatCompilerError("Unknown base class: " + cls.baseName,
-                                                             "<module>",
-                                                             cls.line,
-                                                             cls.column));
+            if (it != classIndex.end()) {
+                classBc.baseClassIndex = static_cast<std::int32_t>(it->second);
+            } else {
+                classBc.baseNativeTypeName = cls.baseName;
             }
-            classBc.baseClassIndex = static_cast<std::int32_t>(it->second);
         }
 
         for (const auto& attr : cls.attributes) {
@@ -3673,6 +3671,7 @@ std::string serializeModuleText(const Module& module) {
     for (const auto& cls : module.classes) {
         out << std::quoted(cls.name) << "\n";
         out << cls.baseClassIndex << "\n";
+        out << std::quoted(cls.baseNativeTypeName) << "\n";
         out << cls.attributes.size() << "\n";
         for (const auto& attr : cls.attributes) {
             out << std::quoted(attr.name) << " " << static_cast<int>(attr.defaultValue.type) << " "
@@ -3764,6 +3763,7 @@ Module deserializeModuleText(const std::string& text) {
         ClassBytecode cls;
         in >> std::quoted(cls.name);
         in >> cls.baseClassIndex;
+        in >> std::quoted(cls.baseNativeTypeName);
 
         std::size_t attrCount = 0;
         in >> attrCount;
@@ -3862,6 +3862,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
         out << "        gs::ClassBytecode c;\n";
         out << "        c.name = " << std::quoted(cls.name) << ";\n";
         out << "        c.baseClassIndex = " << cls.baseClassIndex << ";\n";
+        out << "        c.baseNativeTypeName = " << std::quoted(cls.baseNativeTypeName) << ";\n";
         for (const auto& attr : cls.attributes) {
             out << "        c.attributes.push_back(gs::ClassAttributeBinding{" << std::quoted(attr.name)
                 << ", ";

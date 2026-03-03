@@ -20,10 +20,13 @@ public:
     
     // Convert a value to this type (used when TypeObject is called)
     Value convert(HostContext& context, const Value& value) const;
+    const Value& baseTypeObjectRef() const { return baseTypeObjectRef_; }
+    void setBaseTypeObjectRef(const Value& value) { baseTypeObjectRef_ = value; }
 
 private:
     const Type& typeRef_;
     std::string typeName_;
+    Value baseTypeObjectRef_{Value::Nil()};
 };
 
 // TypeObjectType is the type of all TypeObject instances

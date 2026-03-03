@@ -71,6 +71,7 @@ struct ExecutionContext {
     std::shared_ptr<const Module> modulePin;
     std::vector<std::string> stringPool;
     std::unordered_map<const Module*, std::unordered_map<std::string, Value>> moduleRuntimeGlobals;
+    std::unordered_map<const Module*, std::unordered_map<std::string, Value>> moduleTypeObjectCache;
     std::unordered_map<const Module*, Value> moduleRuntimeObjects;
     std::unordered_set<const Module*> initializedModules;
     std::unordered_set<const Module*> moduleInitInProgress;

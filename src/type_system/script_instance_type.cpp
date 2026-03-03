@@ -7,11 +7,13 @@ namespace gs {
 ScriptInstanceObject::ScriptInstanceObject(const Type& typeRef,
                                            std::size_t classIndex,
                                            std::string className,
-                                           std::shared_ptr<const Module> modulePin)
+                                                                                     std::shared_ptr<const Module> modulePin,
+                                                                                     Value nativeBaseRef)
     : type_(&typeRef),
       classIndex_(classIndex),
       className_(std::move(className)),
-      modulePin_(std::move(modulePin)) {}
+            modulePin_(std::move(modulePin)),
+            nativeBaseRef_(nativeBaseRef) {}
 
 const Type& ScriptInstanceObject::getType() const {
     return *type_;
@@ -27,6 +29,18 @@ const std::string& ScriptInstanceObject::className() const {
 
 const std::shared_ptr<const Module>& ScriptInstanceObject::modulePin() const {
     return modulePin_;
+}
+
+const Value& ScriptInstanceObject::nativeBaseRef() const {
+    return nativeBaseRef_;
+}
+
+bool ScriptInstanceObject::hasNativeBase() const {
+    return nativeBaseRef_.isRef() && nativeBaseRef_.asRef() != nullptr;
+}
+
+void ScriptInstanceObject::setNativeBaseRef(const Value& nativeBaseRef) {
+    nativeBaseRef_ = nativeBaseRef;
 }
 
 std::unordered_map<std::string, Value>& ScriptInstanceObject::fields() {

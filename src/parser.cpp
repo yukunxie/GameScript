@@ -946,6 +946,15 @@ Expr Parser::parsePrimary() {
         return parsePostfix(std::move(expr));
     }
 
+    if (match(TokenType::KeywordSuper)) {
+        Expr expr;
+        expr.type = ExprType::Variable;
+        expr.line = previous().line;
+        expr.column = previous().column;
+        expr.name = "super";
+        return parsePostfix(std::move(expr));
+    }
+
     if (match(TokenType::LParen)) {
         Expr expr = parseExpression();
         consume(TokenType::RParen, "Expected ')' in expression");

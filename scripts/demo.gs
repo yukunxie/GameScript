@@ -163,6 +163,43 @@ fn test_classes_and_host_objects() {
     return 1;
 }
 
+class CountingDict extends Dict {
+    fn __new__(self) {
+        self.writeCount = 0;
+    }
+
+    fn set(self, key, value) {
+        self.writeCount = self.writeCount + 1;
+        return super.set(self, key, value);
+    }
+
+    fn get(self, key) {
+        let value = super.get(self, key);
+        if (value == null) {
+            return -1;
+        }
+        return value;
+    }
+
+    fn size(self) {
+        return super.size(self);
+    }
+}
+
+fn test_native_dict_inheritance() {
+    let d = CountingDict();
+    d[1] = 10;
+    d[2] = 20;
+    assert(d[1] == 10, "CountingDict[1] expected 10, actual {}", d[1]);
+    assert(d[2] == 20, "CountingDict[2] expected 20, actual {}", d[2]);
+    assert(d[999] == -1, "CountingDict missing key expected -1, actual {}", d[999]);
+    assert(d.writeCount == 2, "CountingDict writeCount expected 2, actual {}", d.writeCount);
+    assert(d.size() == 2, "CountingDict size expected 2, actual {}", d.size());
+    assert(typename(d) == "CountingDict", "CountingDict typename expected CountingDict, actual {}", typename(d));
+    assert(1 in d, "CountingDict membership expected key 1 in dict");
+    return 1;
+}
+
 # ============================================================================
 # Benchmark Framework
 # ============================================================================
@@ -512,6 +549,22 @@ fn benchmark_printf() {
     return checksum;
 }
 
+fn benchmark_native_dict_inheritance() {
+    let d = CountingDict();
+    for (i in range(0, 2000)) {
+        d[i] = i + 1;
+    }
+
+    let sum = 0;
+    for (i in range(0, 2000)) {
+        sum = sum + d[i];
+    }
+
+    assert(d.writeCount == 2000, "native-dict benchmark writeCount expected 2000, actual {}", d.writeCount);
+    assert(sum == 2001000, "native-dict benchmark checksum expected 2001000, actual {}", sum);
+    return sum + d.writeCount;
+}
+
 # ============================================================================
 # Run Performance Benchmark Suite
 # ============================================================================
@@ -531,6 +584,7 @@ fn run_performance_benchmark() {
     suite.add("Operators (bitwise/logical/etc)", benchmark_operators);
     suite.add("Lambda Closures (complex)", benchmark_lambda_closures);
     suite.add("Printf Operations", benchmark_printf);
+    suite.add("Native Dict Inheritance", benchmark_native_dict_inheritance);
     
     let results = suite.run();
     
@@ -561,6 +615,7 @@ fn run_bench(verbose) {
     passed = passed + test_loops_and_control_flow();
     passed = passed + test_modules_and_imports();
     passed = passed + test_classes_and_host_objects();
+    passed = passed + test_native_dict_inheritance();
 
     let checksum1 = benchmark_hot_loop();
     let checksum2 = benchmark_module_calls();
@@ -569,6 +624,7 @@ fn run_bench(verbose) {
     let checksum5 = benchmark_lambda_closures();
     let checksum6 = benchmark_operators();
     let checksum7 = benchmark_string_object_operations();
+    let checksum8 = benchmark_native_dict_inheritance();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
@@ -588,12 +644,13 @@ fn run_bench(verbose) {
         print("[bench] checksum5", checksum5);
         print("[bench] checksum6 (operators)", checksum6);
         print("[bench] checksum7 (string-object)", checksum7);
+        print("[bench] checksum8 (native-dict-inherit)", checksum8);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
-    assert(passed == 6, "passed groups expected 6, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + reclaimed;
+    assert(passed == 7, "passed groups expected 7, actual {}", passed);
+    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + checksum8 + reclaimed;
 }
 
 fn ue_entry() {

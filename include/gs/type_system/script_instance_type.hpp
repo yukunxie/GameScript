@@ -11,12 +11,16 @@ public:
     ScriptInstanceObject(const Type& typeRef,
                          std::size_t classIndex,
                          std::string className,
-                         std::shared_ptr<const Module> modulePin = nullptr);
+                         std::shared_ptr<const Module> modulePin = nullptr,
+                         Value nativeBaseRef = Value::Nil());
 
     const Type& getType() const override;
     std::size_t classIndex() const;
     const std::string& className() const;
     const std::shared_ptr<const Module>& modulePin() const;
+    const Value& nativeBaseRef() const;
+    bool hasNativeBase() const;
+    void setNativeBaseRef(const Value& nativeBaseRef);
     std::unordered_map<std::string, Value>& fields();
     const std::unordered_map<std::string, Value>& fields() const;
 
@@ -25,6 +29,7 @@ private:
     std::size_t classIndex_{0};
     std::string className_;
     std::shared_ptr<const Module> modulePin_;
+    Value nativeBaseRef_{Value::Nil()};
     std::unordered_map<std::string, Value> fields_;
 };
 

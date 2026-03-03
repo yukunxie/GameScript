@@ -109,6 +109,194 @@ bool tryGetObjectId(const ExecutionContext& context, Object* object, std::uint64
     return true;
 }
 
+class SuperProxyType final : public Type {
+public:
+    const char* name() const override {
+        return "Super";
+    }
+};
+
+class SuperProxyObject final : public Object {
+public:
+    SuperProxyObject(const Type& typeRef,
+                     Value selfRef,
+                     std::shared_ptr<const Module> modulePin,
+                     std::int32_t scriptBaseClassIndex,
+                     Value nativeBaseRef)
+        : type_(&typeRef),
+          selfRef_(selfRef),
+          modulePin_(std::move(modulePin)),
+          scriptBaseClassIndex_(scriptBaseClassIndex),
+          nativeBaseRef_(nativeBaseRef) {}
+
+    const Type& getType() const override {
+        return *type_;
+    }
+
+    const Value& selfRef() const { return selfRef_; }
+    const std::shared_ptr<const Module>& modulePin() const { return modulePin_; }
+    std::int32_t scriptBaseClassIndex() const { return scriptBaseClassIndex_; }
+    const Value& nativeBaseRef() const { return nativeBaseRef_; }
+
+private:
+    const Type* type_;
+    Value selfRef_{Value::Nil()};
+    std::shared_ptr<const Module> modulePin_;
+    std::int32_t scriptBaseClassIndex_{-1};
+    Value nativeBaseRef_{Value::Nil()};
+};
+
+Value emplaceObject(ExecutionContext& context, std::unique_ptr<Object> object);
+
+Value getOrCreateModuleTypeObject(ExecutionContext& context,
+                                  const std::shared_ptr<const Module>& modulePin,
+                                  const std::string& typeName,
+                                  const Type& representedType,
+                                  const Value& baseTypeObjectRef) {
+    const Module* moduleKey = modulePin.get();
+    auto& typeCache = context.moduleTypeObjectCache[moduleKey];
+    auto found = typeCache.find(typeName);
+    if (found != typeCache.end()) {
+        if (baseTypeObjectRef.isRef()) {
+            Object* cachedObject = found->second.asRef();
+            auto* cachedTypeObject = cachedObject ? dynamic_cast<TypeObject*>(cachedObject) : nullptr;
+            if (cachedTypeObject && !cachedTypeObject->baseTypeObjectRef().isRef()) {
+                cachedTypeObject->setBaseTypeObjectRef(baseTypeObjectRef);
+            }
+        }
+        return found->second;
+    }
+
+    Value typeRef = emplaceObject(context, std::make_unique<TypeObject>(representedType, typeName));
+    Object* object = typeRef.asRef();
+    auto* typeObject = object ? dynamic_cast<TypeObject*>(object) : nullptr;
+    if (!typeObject) {
+        throw std::runtime_error("Failed to create TypeObject for type: " + typeName);
+    }
+
+    typeObject->setBaseTypeObjectRef(baseTypeObjectRef);
+    typeCache[typeName] = typeRef;
+
+    if (typeName == "Type") {
+        object->setProtoRef(typeRef);
+    } else {
+        Value typeTypeRef = getOrCreateModuleTypeObject(context,
+                                                        modulePin,
+                                                        "Type",
+                                                        object->getType(),
+                                                        Value::Nil());
+        object->setProtoRef(typeTypeRef);
+    }
+
+    return typeRef;
+}
+
+Value ensureScriptClassTypeObject(ExecutionContext& context,
+                                  const std::shared_ptr<const Module>& modulePin,
+                                  const Module& module,
+                                  std::size_t classIndex,
+                                  ScriptInstanceType& instanceType,
+                                  DictType& dictType,
+                                  ListType& listType,
+                                  StringType& stringType) {
+    if (classIndex >= module.classes.size()) {
+        throw std::runtime_error("Class index out of range for TypeObject creation");
+    }
+
+    const auto& cls = module.classes[classIndex];
+    Value baseTypeRef = Value::Nil();
+    if (cls.baseClassIndex >= 0) {
+        baseTypeRef = ensureScriptClassTypeObject(context,
+                                                  modulePin,
+                                                  module,
+                                                  static_cast<std::size_t>(cls.baseClassIndex),
+                                                  instanceType,
+                                                  dictType,
+                                                  listType,
+                                                  stringType);
+    } else if (!cls.baseNativeTypeName.empty()) {
+        const Type* nativeType = nullptr;
+        if (cls.baseNativeTypeName == "Dict") {
+            nativeType = &dictType;
+        } else if (cls.baseNativeTypeName == "List") {
+            nativeType = &listType;
+        } else if (cls.baseNativeTypeName == "String") {
+            nativeType = &stringType;
+        } else {
+            nativeType = &instanceType;
+        }
+        baseTypeRef = getOrCreateModuleTypeObject(context,
+                                                  modulePin,
+                                                  cls.baseNativeTypeName,
+                                                  *nativeType,
+                                                  Value::Nil());
+    }
+
+    return getOrCreateModuleTypeObject(context,
+                                       modulePin,
+                                       cls.name,
+                                       instanceType,
+                                       baseTypeRef);
+}
+
+Value ensureObjectProto(ExecutionContext& context,
+                       Object& object,
+                       const std::shared_ptr<const Module>& modulePin,
+                       ScriptInstanceType& instanceType,
+                       DictType& dictType,
+                       ListType& listType,
+                       StringType& stringType) {
+    if (object.protoRef().isRef()) {
+        return object.protoRef();
+    }
+
+    if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
+        auto owningModule = instance->modulePin() ? instance->modulePin() : modulePin;
+        if (owningModule && instance->classIndex() < owningModule->classes.size()) {
+            Value typeObjectRef = ensureScriptClassTypeObject(context,
+                                                              owningModule,
+                                                              *owningModule,
+                                                              instance->classIndex(),
+                                                              instanceType,
+                                                              dictType,
+                                                              listType,
+                                                              stringType);
+            object.setProtoRef(typeObjectRef);
+            return typeObjectRef;
+        }
+    }
+
+    const Type& runtimeType = object.getType();
+    const std::string typeName = runtimeType.name();
+    Value baseTypeRef = Value::Nil();
+
+    if (dynamic_cast<TypeObject*>(&object)) {
+        Value proto = getOrCreateModuleTypeObject(context,
+                                                  modulePin,
+                                                  "Type",
+                                                  runtimeType,
+                                                  Value::Nil());
+        object.setProtoRef(proto);
+        return proto;
+    }
+
+    if (&runtimeType == &instanceType) {
+        baseTypeRef = getOrCreateModuleTypeObject(context,
+                                                  modulePin,
+                                                  "Object",
+                                                  instanceType,
+                                                  Value::Nil());
+    }
+
+    Value proto = getOrCreateModuleTypeObject(context,
+                                              modulePin,
+                                              typeName,
+                                              runtimeType,
+                                              baseTypeRef);
+    object.setProtoRef(proto);
+    return proto;
+}
+
 std::size_t resolveFrameSourceLine(const Frame& frame) {
     if (!frame.modulePin) {
         return 0;
@@ -215,6 +403,8 @@ void traceObjectChildren(ExecutionContext& context, std::uint64_t objectId, bool
         markValue(context, value, youngOnly);
     };
 
+    markChild(object->protoRef());
+
     if (auto* list = dynamic_cast<ListObject*>(object)) {
         for (const auto& value : list->data()) {
             markChild(value);
@@ -235,6 +425,7 @@ void traceObjectChildren(ExecutionContext& context, std::uint64_t objectId, bool
             (void)name;
             markChild(value);
         }
+        markChild(instance->nativeBaseRef());
         return;
     }
 
@@ -257,6 +448,16 @@ void traceObjectChildren(ExecutionContext& context, std::uint64_t objectId, bool
         markChild(cell->value());
         return;
     }
+        if (auto* superProxy = dynamic_cast<SuperProxyObject*>(object)) {
+            markChild(superProxy->selfRef());
+            markChild(superProxy->nativeBaseRef());
+            return;
+        }
+
+        if (auto* typeObject = dynamic_cast<TypeObject*>(object)) {
+            markChild(typeObject->baseTypeObjectRef());
+            return;
+        }
 }
 
 void markRoots(ExecutionContext& context, bool youngOnly) {
@@ -283,6 +484,14 @@ void markRoots(ExecutionContext& context, bool youngOnly) {
         for (const auto& [name, value] : globals) {
             (void)name;
             markValue(context, value, youngOnly);
+        }
+    }
+
+    for (const auto& [modulePtr, typeCache] : context.moduleTypeObjectCache) {
+        (void)modulePtr;
+        for (const auto& [typeName, typeRef] : typeCache) {
+            (void)typeName;
+            markValue(context, typeRef, youngOnly);
         }
     }
 
@@ -910,6 +1119,72 @@ Value resolveRuntimeName(ExecutionContext& context,
         throw std::runtime_error("Frame module is null");
     }
 
+    if (name == "super") {
+        if (context.frames.empty()) {
+            throw std::runtime_error("'super' can only be used inside methods");
+        }
+
+        Frame& frame = context.frames.back();
+        if (!frame.modulePin) {
+            throw std::runtime_error("'super' requires valid method module binding");
+        }
+
+        std::int32_t ownerClassIndex = -1;
+        for (std::size_t i = 0; i < frame.modulePin->classes.size(); ++i) {
+            for (const auto& method : frame.modulePin->classes[i].methods) {
+                if (method.functionIndex == frame.functionIndex) {
+                    ownerClassIndex = static_cast<std::int32_t>(i);
+                    break;
+                }
+            }
+            if (ownerClassIndex >= 0) {
+                break;
+            }
+        }
+
+        if (ownerClassIndex < 0) {
+            throw std::runtime_error("'super' can only be used in class methods");
+        }
+
+        if (frame.locals.empty()) {
+            throw std::runtime_error("'super' method frame is missing self argument");
+        }
+
+        const Value selfRef = frame.locals.front();
+        if (!selfRef.isRef()) {
+            throw std::runtime_error("'super' requires self to be an instance object");
+        }
+
+        Object* selfObject = selfRef.asRef();
+        if (!selfObject || !context.objectPtrToId.contains(selfObject)) {
+            throw std::runtime_error("'super' self reference is stale");
+        }
+
+        auto* instance = dynamic_cast<ScriptInstanceObject*>(selfObject);
+        if (!instance) {
+            throw std::runtime_error("'super' requires script instance as self");
+        }
+
+        const auto& ownerClass = frame.modulePin->classes.at(static_cast<std::size_t>(ownerClassIndex));
+        const std::int32_t scriptBaseClassIndex = ownerClass.baseClassIndex;
+        Value nativeBaseRef = Value::Nil();
+        if (instance->hasNativeBase()) {
+            nativeBaseRef = instance->nativeBaseRef();
+        }
+
+        if (scriptBaseClassIndex < 0 && !nativeBaseRef.isRef()) {
+            throw std::runtime_error("'super' used in class without base type");
+        }
+
+        static SuperProxyType superProxyType;
+        return emplaceObject(context,
+                             std::make_unique<SuperProxyObject>(superProxyType,
+                                                                selfRef,
+                                                                frame.modulePin,
+                                                                scriptBaseClassIndex,
+                                                                nativeBaseRef));
+    }
+
     auto moduleGlobalsIt = context.moduleRuntimeGlobals.find(frameModule.get());
     if (moduleGlobalsIt != context.moduleRuntimeGlobals.end()) {
         auto nameIt = moduleGlobalsIt->second.find(name);
@@ -998,7 +1273,33 @@ void initializeInstanceAttributes(const Module& module,
                                   std::size_t classIndex,
                                   ScriptInstanceObject& instance);
 
+Value makeNativeBaseInstance(ExecutionContext& context,
+                             ListType& listType,
+                             DictType& dictType,
+                             const HostRegistry& hosts,
+                             const std::string& nativeTypeName) {
+    if (nativeTypeName == "List") {
+        return emplaceObject(context, std::make_unique<ListObject>(listType));
+    }
+    if (nativeTypeName == "Dict") {
+        return emplaceObject(context, std::make_unique<DictObject>(dictType));
+    }
+
+    if (!hosts.has(nativeTypeName)) {
+        throw std::runtime_error("Unknown native base type: " + nativeTypeName);
+    }
+
+    VmHostContext hostContext(context);
+    const Value created = hosts.invoke(nativeTypeName, hostContext, {});
+    if (!created.isRef()) {
+        throw std::runtime_error("Native base type constructor did not return object: " + nativeTypeName);
+    }
+    return created;
+}
+
 Value makeScriptInstance(ExecutionContext& context,
+                         ListType& listType,
+                         DictType& dictType,
                          FunctionType& functionType,
                          ClassType& classType,
                          NativeFunctionType& nativeFunctionType,
@@ -1012,7 +1313,8 @@ Value makeScriptInstance(ExecutionContext& context,
         throw std::runtime_error("Class index out of range");
     }
 
-    const std::string& className = module.classes[classIndex].name;
+    const auto& cls = module.classes[classIndex];
+    const std::string& className = cls.name;
     const auto instanceModulePin = modulePin;
     const Value instanceRef = emplaceObject(context,
                                             std::make_unique<ScriptInstanceObject>(instanceType,
@@ -1033,6 +1335,29 @@ Value makeScriptInstance(ExecutionContext& context,
                                  instanceModulePin,
                                  classIndex,
                                  *instance);
+
+    std::string resolvedNativeBaseTypeName;
+    std::int32_t walkClassIndex = static_cast<std::int32_t>(classIndex);
+    while (walkClassIndex >= 0) {
+        const auto& walkClass = module.classes.at(static_cast<std::size_t>(walkClassIndex));
+        if (!walkClass.baseNativeTypeName.empty()) {
+            resolvedNativeBaseTypeName = walkClass.baseNativeTypeName;
+            break;
+        }
+        walkClassIndex = walkClass.baseClassIndex;
+    }
+
+    if (!resolvedNativeBaseTypeName.empty()) {
+        const Value nativeBaseRef = makeNativeBaseInstance(context,
+                                                           listType,
+                                                           dictType,
+                                                           hosts,
+                                                           resolvedNativeBaseTypeName);
+        rememberWriteBarrier(context, *instance, nativeBaseRef);
+        instance->setNativeBaseRef(nativeBaseRef);
+        instance->fields()["__native_base__"] = nativeBaseRef;
+    }
+
     return instanceRef;
 }
 
@@ -1355,6 +1680,8 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
 
                 const std::size_t classIndex = classObject->classIndex();
                 const Value instanceRef = makeScriptInstance(context,
+                                                             listType_,
+                                                             dictType_,
                                                              functionType_,
                                                              classType_,
                                                              nativeFunctionType_,
@@ -2053,8 +2380,32 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                             }
                         }
                     } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
-                        const std::string attrName = __str__Value(context, element);
-                        found = inst->fields().contains(attrName);
+                        if (inst->hasNativeBase()) {
+                            Object& nativeBaseObject = getObject(context, inst->nativeBaseRef());
+                            if (auto* nativeList = dynamic_cast<ListObject*>(&nativeBaseObject)) {
+                                for (const auto& item : nativeList->data()) {
+                                    if (valueEquals(context, element, item)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            } else if (auto* nativeDict = dynamic_cast<DictObject*>(&nativeBaseObject)) {
+                                found = nativeDict->data().contains(element);
+                            } else if (auto* nativeTuple = dynamic_cast<TupleObject*>(&nativeBaseObject)) {
+                                for (const auto& item : nativeTuple->data()) {
+                                    if (valueEquals(context, element, item)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                const std::string attrName = __str__Value(context, element);
+                                found = inst->fields().contains(attrName);
+                            }
+                        } else {
+                            const std::string attrName = __str__Value(context, element);
+                            found = inst->fields().contains(attrName);
+                        }
                     } else {
                         throw std::runtime_error("'in' operator expects list, dict, tuple, or object");
                     }
@@ -2095,8 +2446,32 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                         }
                     }
                 } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
-                    const std::string attrName = __str__Value(context, element);
-                    found = inst->fields().contains(attrName);
+                    if (inst->hasNativeBase()) {
+                        Object& nativeBaseObject = getObject(context, inst->nativeBaseRef());
+                        if (auto* nativeList = dynamic_cast<ListObject*>(&nativeBaseObject)) {
+                            for (const auto& item : nativeList->data()) {
+                                if (valueEquals(context, element, item)) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        } else if (auto* nativeDict = dynamic_cast<DictObject*>(&nativeBaseObject)) {
+                            found = nativeDict->data().contains(element);
+                        } else if (auto* nativeTuple = dynamic_cast<TupleObject*>(&nativeBaseObject)) {
+                            for (const auto& item : nativeTuple->data()) {
+                                if (valueEquals(context, element, item)) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            const std::string attrName = __str__Value(context, element);
+                            found = inst->fields().contains(attrName);
+                        }
+                    } else {
+                        const std::string attrName = __str__Value(context, element);
+                        found = inst->fields().contains(attrName);
+                    }
                 } else {
                     throw std::runtime_error("'in' operator expects list, dict, tuple, or object");
                 }
@@ -2135,8 +2510,32 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                             }
                         }
                     } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
-                        const std::string attrName = __str__Value(context, element);
-                        found = inst->fields().contains(attrName);
+                        if (inst->hasNativeBase()) {
+                            Object& nativeBaseObject = getObject(context, inst->nativeBaseRef());
+                            if (auto* nativeList = dynamic_cast<ListObject*>(&nativeBaseObject)) {
+                                for (const auto& item : nativeList->data()) {
+                                    if (valueEquals(context, element, item)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            } else if (auto* nativeDict = dynamic_cast<DictObject*>(&nativeBaseObject)) {
+                                found = nativeDict->data().contains(element);
+                            } else if (auto* nativeTuple = dynamic_cast<TupleObject*>(&nativeBaseObject)) {
+                                for (const auto& item : nativeTuple->data()) {
+                                    if (valueEquals(context, element, item)) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                const std::string attrName = __str__Value(context, element);
+                                found = inst->fields().contains(attrName);
+                            }
+                        } else {
+                            const std::string attrName = __str__Value(context, element);
+                            found = inst->fields().contains(attrName);
+                        }
                     } else {
                         throw std::runtime_error("'not in' operator expects list, dict, tuple, or object");
                     }
@@ -2177,8 +2576,32 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                         }
                     }
                 } else if (auto* inst = dynamic_cast<ScriptInstanceObject*>(obj)) {
-                    const std::string attrName = __str__Value(context, element);
-                    found = inst->fields().contains(attrName);
+                    if (inst->hasNativeBase()) {
+                        Object& nativeBaseObject = getObject(context, inst->nativeBaseRef());
+                        if (auto* nativeList = dynamic_cast<ListObject*>(&nativeBaseObject)) {
+                            for (const auto& item : nativeList->data()) {
+                                if (valueEquals(context, element, item)) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        } else if (auto* nativeDict = dynamic_cast<DictObject*>(&nativeBaseObject)) {
+                            found = nativeDict->data().contains(element);
+                        } else if (auto* nativeTuple = dynamic_cast<TupleObject*>(&nativeBaseObject)) {
+                            for (const auto& item : nativeTuple->data()) {
+                                if (valueEquals(context, element, item)) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            const std::string attrName = __str__Value(context, element);
+                            found = inst->fields().contains(attrName);
+                        }
+                    } else {
+                        const std::string attrName = __str__Value(context, element);
+                        found = inst->fields().contains(attrName);
+                    }
                 } else {
                     throw std::runtime_error("'not in' operator expects list, dict, tuple, or object");
                 }
@@ -2299,6 +2722,8 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
             const std::size_t classIndex = static_cast<std::size_t>(ins.a);
             const Value instanceRef = makeScriptInstance(context,
+                                                         listType_,
+                                                         dictType_,
                                                          functionType_,
                                                          classType_,
                                                          nativeFunctionType_,
@@ -2330,9 +2755,30 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             const Value selfRef = popRaw(frame.stack, frame.stackTop);
             Object& object = getObject(context, selfRef);
             const auto& attrName = frameModule->strings.at(ins.a);
+            if (attrName == "__proto__") {
+                const Value protoRef = ensureObjectProto(context,
+                                                         object,
+                                                         frameModule,
+                                                         instanceType_,
+                                                         dictType_,
+                                                         listType_,
+                                                         stringType_);
+                pushRaw(frame.stack, frame.stackTop, protoRef);
+                break;
+            }
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
                 auto it = instance->fields().find(attrName);
                 if (it == instance->fields().end()) {
+                    if (instance->hasNativeBase()) {
+                        Object& nativeBaseObject = getObject(context, instance->nativeBaseRef());
+                        try {
+                            pushRaw(frame.stack,
+                                    frame.stackTop,
+                                    nativeBaseObject.getType().getMember(nativeBaseObject, attrName));
+                            break;
+                        } catch (const std::runtime_error&) {
+                        }
+                    }
                     throw std::runtime_error("Unknown class attribute: " + attrName);
                 }
                 const auto valueModule = instance->modulePin() ? instance->modulePin() : frameModule;
@@ -2420,6 +2866,9 @@ load_attr_done:
             const Value selfRef = popRaw(frame.stack, frame.stackTop);
             Object& object = getObject(context, selfRef);
             const auto& attrName = frameModule->strings.at(ins.a);
+            if (attrName == "__proto__") {
+                throw std::runtime_error("__proto__ is read-only");
+            }
             const Value normalized = normalizeRuntimeValue(context,
                                                            functionType_,
                                                            classType_,
@@ -2430,6 +2879,28 @@ load_attr_done:
                                                            assigned,
                                                            false);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
+                if (attrName == "__native_base__") {
+                    throw std::runtime_error("__native_base__ is read-only");
+                }
+
+                if (instance->hasNativeBase()) {
+                    Object& nativeBaseObject = getObject(context, instance->nativeBaseRef());
+                    try {
+                        pushRaw(frame.stack,
+                                frame.stackTop,
+                                nativeBaseObject.getType().setMember(nativeBaseObject, attrName, normalized));
+                        break;
+                    } catch (const std::runtime_error& ex) {
+                        const std::string message = ex.what();
+                        if (!message.starts_with("Unknown member") &&
+                            !message.starts_with("Unknown or read-only") &&
+                            message.find("Unknown member") == std::string::npos &&
+                            message.find("Unknown or read-only") == std::string::npos) {
+                            throw;
+                        }
+                    }
+                }
+
                 rememberWriteBarrier(context, *instance, normalized);
                 instance->fields()[attrName] = normalized;
                 pushRaw(frame.stack, frame.stackTop, normalized);
@@ -2505,6 +2976,49 @@ load_attr_done:
                 throw std::runtime_error("Script function not found: " + methodName);
             }
 
+            if (auto* superProxy = dynamic_cast<SuperProxyObject*>(&object)) {
+                if (superProxy->scriptBaseClassIndex() >= 0) {
+                    std::size_t baseMethodIndex = 0;
+                    if (tryFindClassMethodInModule(*superProxy->modulePin(),
+                                                   static_cast<std::size_t>(superProxy->scriptBaseClassIndex()),
+                                                   methodName,
+                                                   baseMethodIndex)) {
+                        pushCallFrame(context,
+                                      superProxy->modulePin(),
+                                      baseMethodIndex,
+                                      argScratch);
+                        break;
+                    }
+                }
+
+                if (superProxy->nativeBaseRef().isRef()) {
+                    std::vector<Value> forwardedArgs = argScratch;
+                    if (!forwardedArgs.empty() &&
+                        forwardedArgs.front().isRef() &&
+                        superProxy->selfRef().isRef() &&
+                        forwardedArgs.front().asRef() == superProxy->selfRef().asRef()) {
+                        forwardedArgs.erase(forwardedArgs.begin());
+                    }
+
+                    Object& nativeBaseObject = getObject(context, superProxy->nativeBaseRef());
+                    VmHostContext hostContext(*this, context);
+                    BoundClassType::setThreadLocalContext(&hostContext);
+                    PatternType::setThreadLocalContext(&hostContext);
+                    pushRaw(frame.stack,
+                            frame.stackTop,
+                            nativeBaseObject.getType().callMethod(nativeBaseObject,
+                                                                  methodName,
+                                                                  forwardedArgs,
+                                                                  makeString,
+                                                                  valueStr));
+                    BoundClassType::setThreadLocalContext(nullptr);
+                    PatternType::setThreadLocalContext(nullptr);
+                    break;
+                }
+
+                throw std::runtime_error("super has no callable base method: " + methodName);
+            }
+
             if (auto* list = dynamic_cast<ListObject*>(&object)) {
                 if (methodName == "push" && !argScratch.empty()) {
                     rememberWriteBarrier(context, *list, argScratch[0]);
@@ -2562,6 +3076,21 @@ load_attr_done:
                                   methodModule,
                                   classMethodIndex,
                                   methodArgs);
+                    break;
+                }
+
+                if (instance->hasNativeBase()) {
+                    Object& nativeBaseObject = getObject(context, instance->nativeBaseRef());
+                    VmHostContext hostContext(*this, context);
+                    BoundClassType::setThreadLocalContext(&hostContext);
+                    PatternType::setThreadLocalContext(&hostContext);
+                    pushRaw(frame.stack, frame.stackTop, nativeBaseObject.getType().callMethod(nativeBaseObject,
+                                                                                                methodName,
+                                                                                                argScratch,
+                                                                                                makeString,
+                                                                                                valueStr));
+                    BoundClassType::setThreadLocalContext(nullptr);
+                    PatternType::setThreadLocalContext(nullptr);
                     break;
                 }
 

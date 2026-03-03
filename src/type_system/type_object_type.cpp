@@ -104,6 +104,20 @@ Value TypeObject::convert(HostContext& context, const Value& value) const {
 TypeObjectType::TypeObjectType() {
     // TypeObject can be called like a function to convert values
     // This will be handled in the VM when calling a TypeObject
+    registerMemberAttribute(
+        "__base__",
+        [](Object& self) -> Value {
+            auto* typeObj = dynamic_cast<TypeObject*>(&self);
+            if (!typeObj) {
+                throw std::runtime_error("__base__ getter requires TypeObject");
+            }
+            return typeObj->baseTypeObjectRef();
+        },
+        [](Object& self, const Value& value) -> Value {
+            (void)self;
+            (void)value;
+            throw std::runtime_error("TypeObject.__base__ is read-only");
+        });
 }
 
 const char* TypeObjectType::name() const {

@@ -301,6 +301,7 @@ struct ClassAttributeBinding {
 struct ClassBytecode {
     std::string name;
     std::int32_t baseClassIndex{-1};
+    std::string baseNativeTypeName;
     std::vector<ClassAttributeBinding> attributes;
     std::vector<ClassMethodBinding> methods;
 };
