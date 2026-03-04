@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gs/export.hpp"
 #include "gs/bytecode.hpp"
 #include "gs/type_system.hpp"  // Required for Object, Type
 
@@ -44,7 +45,7 @@ using HostFunction = std::function<Value(HostContext& context, const std::vector
 // HostRegistry (unchanged from original)
 // ============================================================================
 
-class HostRegistry {
+class GS_API HostRegistry {
 public:
     HostRegistry();
 
@@ -260,7 +261,7 @@ private:
 // Class Binder (New V2 API)
 // ============================================================================
 
-class ClassBinder {
+class GS_API ClassBinder {
 public:
     ClassBinder(BindingContext& ctx, const std::string& className);
     ~ClassBinder();  // Registers all bindings when the binder goes out of scope
@@ -314,7 +315,7 @@ private:
 // Binding Context (New V2 API - Main Interface)
 // ============================================================================
 
-class BindingContext {
+class GS_API BindingContext {
 public:
     explicit BindingContext(HostRegistry& registry);
     
@@ -377,8 +378,8 @@ private:
 // Native Type Registry (for TypeConverter<T>::toValue)
 // ============================================================================
 
-void registerNativeType(const std::type_info& typeInfo, const Type& type);
-const Type* getNativeType(const std::type_info& typeInfo);
+GS_API void registerNativeType(const std::type_info& typeInfo, const Type& type);
+GS_API const Type* getNativeType(const std::type_info& typeInfo);
 
 } // namespace gs
 

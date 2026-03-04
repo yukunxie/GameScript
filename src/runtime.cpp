@@ -55,6 +55,8 @@ Runtime::Runtime()
         bindGlobalModule(hosts_);
 }
 
+Runtime::~Runtime() = default;
+
 HostRegistry& Runtime::host() {
     return hosts_;
 }

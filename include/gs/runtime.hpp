@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gs/export.hpp"
 #include "gs/binding.hpp"
 #include "gs/compiler.hpp"
 #include "gs/task_system.hpp"
@@ -13,9 +14,10 @@
 
 namespace gs {
 
-class Runtime {
+class GS_API Runtime {
 public:
     Runtime();
+    ~Runtime();
 
     HostRegistry& host();
 

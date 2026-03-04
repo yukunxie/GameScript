@@ -13,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(GS_BUILD_TOOLS "Build script compiler tool" ON)
 option(GS_BUILD_DEMO "Build demo runtime app" ON)
+option(GS_BUILD_SHARED "Build gamescript as shared library (DLL/.so/.dylib)" ON)
 
 set(GS_LIB_SOURCES
     src/binding.cpp
@@ -49,6 +50,7 @@ set(GS_LIB_SOURCES
 set(GS_LIB_HEADERS
     include/gs/binding.hpp
     include/gs/bound_class_type.hpp
+    include/gs/export.hpp
     include/gs/error_logger.hpp
     include/gs/global.hpp
     include/gs/bytecode.hpp
@@ -82,7 +84,11 @@ set(GS_LIB_HEADERS
     include/gs/vm.hpp
 )
 
-add_library(gamescript STATIC)
+if(GS_BUILD_SHARED)
+    add_library(gamescript SHARED)
+else()
+    add_library(gamescript STATIC)
+endif()
 target_sources(gamescript PRIVATE ${GS_LIB_SOURCES} ${GS_LIB_HEADERS})
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${GS_LIB_SOURCES} ${GS_LIB_HEADERS})
@@ -96,6 +102,14 @@ target_compile_definitions(gamescript
     PRIVATE
         GS_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
 )
+
+if(GS_BUILD_SHARED)
+    target_compile_definitions(gamescript PRIVATE GS_BUILDING_DLL)
+else()
+    target_compile_definitions(gamescript PUBLIC GS_STATIC_LIB)
+endif()
+
+set_target_properties(gamescript PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Link DbgHelp for stack trace capture on Windows
 if(WIN32)
@@ -115,7 +129,11 @@ if(GS_BUILD_DEMO)
     source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES app/main.cpp)
     set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gs_demo)
     
-    add_executable(run_test run_test.cpp)
+    add_executable(run_test app/run_test.cpp)
     target_link_libraries(run_test PRIVATE gamescript)
-    source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES run_test.cpp)
+
+    add_executable(run_bytecode app/run_bytecode.cpp)
+    target_link_libraries(run_bytecode PRIVATE gamescript)
+
+    source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES app/run_test.cpp app/run_bytecode.cpp)
 endif()

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gs/export.hpp"
 #include "gs/binding.hpp"
 #include "gs/type_system/type_base.hpp"
 
@@ -27,38 +28,38 @@ namespace gs {
 
 class BoundClassType : public Type {
 public:
-    explicit BoundClassType(std::string name);
+    GS_API explicit BoundClassType(std::string name);
     
-    const char* name() const override;
-    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override;
+    GS_API const char* name() const override;
+    GS_API std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override;
     
     // Override getMember to support HostContext-aware getters
-    Value getMember(Object& self, const std::string& member) const override;
+    GS_API Value getMember(Object& self, const std::string& member) const override;
     
     // Override setMember to support HostContext-aware setters
-    Value setMember(Object& self, const std::string& member, const Value& value) const override;
+    GS_API Value setMember(Object& self, const std::string& member, const Value& value) const override;
     
     // Override callMethod to support HostContext-aware methods
-    Value callMethod(Object& self,
-                    const std::string& method,
-                    const std::vector<Value>& args,
-                    const StringFactory& makeString,
-                    const ValueStrInvoker& valueStr) const override;
+    GS_API Value callMethod(Object& self,
+                            const std::string& method,
+                            const std::vector<Value>& args,
+                            const StringFactory& makeString,
+                            const ValueStrInvoker& valueStr) const override;
     
     // Register member accessors (used by ClassBinder)
-    void registerGetter(const std::string& name,
-                       std::function<Value(HostContext&, Object&)> getter);
+    GS_API void registerGetter(const std::string& name,
+                               std::function<Value(HostContext&, Object&)> getter);
     
-    void registerSetter(const std::string& name,
-                       std::function<Value(HostContext&, Object&, const Value&)> setter);
+    GS_API void registerSetter(const std::string& name,
+                               std::function<Value(HostContext&, Object&, const Value&)> setter);
     
     // Register method invokers (used by ClassBinder)
-    void registerMethod(const std::string& name,
-                       std::function<Value(HostContext&, Object&, const std::vector<Value>&)> method);
+    GS_API void registerMethod(const std::string& name,
+                               std::function<Value(HostContext&, Object&, const std::vector<Value>&)> method);
     
     // Set the HostContext for the current thread (called by VM before member access)
-    static void setThreadLocalContext(HostContext* ctx);
-    static HostContext* getThreadLocalContext();
+    GS_API static void setThreadLocalContext(HostContext* ctx);
+    GS_API static HostContext* getThreadLocalContext();
     
 private:
     std::string name_;
