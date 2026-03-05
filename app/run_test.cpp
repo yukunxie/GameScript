@@ -20,6 +20,7 @@ int main(int argc, char** argv) {
         } else {
             std::vector<std::string> searchPaths = {
                 ".",
+                "..",
                 "scripts",
                 "../scripts",
                 "../../scripts",
