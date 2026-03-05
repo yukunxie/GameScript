@@ -114,6 +114,7 @@ bool Runtime::loadBytecodeFile(const std::string& path) {
     }
 
     auto newModule = std::make_shared<Module>(deserializeModuleText(bc));
+    newModule->sourcePath = path;
     {
         std::scoped_lock lock(moduleMutex_);
         module_ = std::move(newModule);

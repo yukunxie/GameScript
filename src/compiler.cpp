@@ -12,6 +12,7 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -48,6 +49,47 @@ bool defaultCompileDisassemblyDumpEnabled() {
 }
 
 bool g_compileDisassemblyDumpEnabled = defaultCompileDisassemblyDumpEnabled();
+
+class CompilerException final : public std::exception {
+public:
+    explicit CompilerException(std::string message) : message_(std::move(message)) {}
+
+    const char* what() const noexcept override {
+        return message_.c_str();
+    }
+
+private:
+    std::string message_;
+};
+
+std::string attachSourceFileToDiagnostic(const std::string& sourcePath,
+                                         const std::string& diagnostic) {
+    if (sourcePath.empty()) {
+        return diagnostic;
+    }
+    if (diagnostic.rfind(sourcePath + ":", 0) == 0) {
+        return diagnostic;
+    }
+
+    std::smatch match;
+    static const std::regex lineColRe(R"(^\s*(\d+):(\d+):\s*error:\s*(.*)$)");
+    if (std::regex_match(diagnostic, match, lineColRe)) {
+        return sourcePath + ":" + match[1].str() + ":" + match[2].str() + ": error: " + match[3].str();
+    }
+    if (diagnostic.rfind("error:", 0) == 0) {
+        return sourcePath + ":1:1: " + diagnostic;
+    }
+    return sourcePath + ":1:1: error: " + diagnostic;
+}
+
+[[noreturn]] void throwCompilerError(const std::string& diagnostic) {
+    throw CompilerException(diagnostic);
+}
+
+[[noreturn]] void throwCompilerError(const std::string& sourcePath,
+                                     const std::string& diagnostic) {
+    throw CompilerException(attachSourceFileToDiagnostic(sourcePath, diagnostic));
+}
 
 const char* opcodeName(OpCode op) {
     switch (op) {
@@ -317,12 +359,12 @@ std::string irOperandHint(const Module& module, const IRInstruction& ins) {
 void writeTextStrict(const std::filesystem::path& path, const std::string& text) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
-        throw std::runtime_error("error: failed to write compiler debug output: " + path.string() + " [function: <module>]");
+        throwCompilerError("error: failed to write compiler debug output: " + path.string() + " [function: <module>]");
     }
     out << text;
     out.flush();
     if (!out) {
-        throw std::runtime_error("error: failed to flush compiler debug output: " + path.string() + " [function: <module>]");
+        throwCompilerError("error: failed to flush compiler debug output: " + path.string() + " [function: <module>]");
     }
 }
 
@@ -427,7 +469,7 @@ void dumpCompilerDebugFiles(const std::string& sourcePath,
     std::error_code ec;
     fs::create_directories(outputDir, ec);
     if (ec) {
-        throw std::runtime_error("error: failed to create compiler debug directory: " + outputDir.string() + " [function: <module>]");
+        throwCompilerError("error: failed to create compiler debug directory: " + outputDir.string() + " [function: <module>]");
     }
 
     const std::string stem = source.stem().string();
@@ -690,7 +732,7 @@ ImportStatement parseImportLine(const std::string& rawLine, std::size_t lineNo =
         while (std::getline(namesIn, segment, ',')) {
             std::string name = trimCopy(segment);
             if (name.empty() || !std::regex_match(name, identRe)) {
-                throw std::runtime_error(formatCompilerError("Invalid import symbol in line: " + rawLine,
+                throwCompilerError(formatCompilerError("Invalid import symbol in line: " + rawLine,
                                                              "<module>",
                                                              lineNo,
                                                              1));
@@ -699,7 +741,7 @@ ImportStatement parseImportLine(const std::string& rawLine, std::size_t lineNo =
         }
 
         if (stmt.importNames.empty()) {
-            throw std::runtime_error(formatCompilerError("from-import requires at least one symbol",
+            throwCompilerError(formatCompilerError("from-import requires at least one symbol",
                                                          "<module>",
                                                          lineNo,
                                                          1));
@@ -721,7 +763,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
         return cached->second;
     }
     if (visiting.contains(canonical)) {
-        throw std::runtime_error(formatCompilerError("Cyclic import detected: " + canonical,
+        throwCompilerError(formatCompilerError("Cyclic import detected: " + canonical,
                                                      "<module>",
                                                      1,
                                                      1));
@@ -729,7 +771,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
 
     const std::string source = readFileText(canonical);
     if (source.empty()) {
-        throw std::runtime_error(formatCompilerError("Failed to read script file: " + canonical,
+        throwCompilerError(formatCompilerError("Failed to read script file: " + canonical,
                                                      "<module>",
                                                      1,
                                                      1));
@@ -758,7 +800,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
 
         if (stmt.isWildcard) {
             if (stmt.alias.empty()) {
-                throw std::runtime_error(formatCompilerError("from " + stmt.moduleSpec + " import * requires alias in strict module mode",
+                throwCompilerError(formatCompilerError("from " + stmt.moduleSpec + " import * requires alias in strict module mode",
                                                              "<module>",
                                                              lineNo,
                                                              1));
@@ -769,7 +811,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
 
         if (stmt.importNames.size() > 1) {
             if (stmt.alias.empty()) {
-                throw std::runtime_error(formatCompilerError("from " + stmt.moduleSpec + " import a,b requires alias in strict module mode",
+                throwCompilerError(formatCompilerError("from " + stmt.moduleSpec + " import a,b requires alias in strict module mode",
                                                              "<module>",
                                                              lineNo,
                                                              1));
@@ -787,7 +829,7 @@ ProcessedModule preprocessImportsRecursive(const std::string& filePath,
         const std::string localName = stmt.alias.empty() ? importedName : stmt.alias;
         static const std::regex identRe(R"(^[A-Za-z_][A-Za-z0-9_]*$)");
         if (!std::regex_match(localName, identRe)) {
-            throw std::runtime_error(formatCompilerError("Invalid local alias generated for from-import: " + localName,
+            throwCompilerError(formatCompilerError("Invalid local alias generated for from-import: " + localName,
                                                          "<module>",
                                                          lineNo,
                                                          1));
@@ -1071,7 +1113,7 @@ void validateLocalUsageInStatements(const std::vector<Stmt>& statements,
         case StmtType::LetAwait:
             declaredNames.insert(stmt.name);
             if (localNames.contains(stmt.awaitSource) && !declaredNames.contains(stmt.awaitSource)) {
-                throw std::runtime_error(formatCompilerError("Local variable used before declaration: " + stmt.awaitSource,
+                throwCompilerError(formatCompilerError("Local variable used before declaration: " + stmt.awaitSource,
                                                              scopeName,
                                                              stmt.line,
                                                              stmt.column));
@@ -1140,7 +1182,7 @@ void validateLocalUsageInExpr(const Expr& expr,
     switch (expr.type) {
     case ExprType::Variable:
         if (localNames.contains(expr.name) && !declaredNames.contains(expr.name)) {
-            throw std::runtime_error(formatCompilerError("Local variable used before declaration: " + expr.name,
+            throwCompilerError(formatCompilerError("Local variable used before declaration: " + expr.name,
                                                          scopeName,
                                                          expr.line,
                                                          expr.column));
@@ -1148,7 +1190,7 @@ void validateLocalUsageInExpr(const Expr& expr,
         return;
     case ExprType::AssignVariable:
         if (localNames.contains(expr.name) && !declaredNames.contains(expr.name)) {
-            throw std::runtime_error(formatCompilerError("Local variable used before declaration: " + expr.name,
+            throwCompilerError(formatCompilerError("Local variable used before declaration: " + expr.name,
                                                          scopeName,
                                                          expr.line,
                                                          expr.column));
@@ -1245,7 +1287,7 @@ void collectLocalDeclarations(const std::vector<Stmt>& statements,
         case StmtType::LetSpawn:
         case StmtType::LetAwait:
             if (localNames.contains(stmt.name)) {
-                throw std::runtime_error(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
+                throwCompilerError(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
                                                              scopeName,
                                                              stmt.line,
                                                              stmt.column));
@@ -1288,7 +1330,7 @@ void validateScopeLocalRules(const std::vector<Stmt>& statements,
 
     for (const auto& name : predeclaredNames) {
         if (localNames.contains(name)) {
-            throw std::runtime_error(formatCompilerError("Duplicate parameter in scope: " + name,
+            throwCompilerError(formatCompilerError("Duplicate parameter in scope: " + name,
                                                          scopeName,
                                                          0,
                                                          0));
@@ -1326,7 +1368,7 @@ Value evalClassFieldInit(const Expr& expr,
         break;
     }
 
-    throw std::runtime_error(formatCompilerError("Class field initializer must be number/string/symbol name",
+    throwCompilerError(formatCompilerError("Class field initializer must be number/string/symbol name",
                                                  scopeName,
                                                  expr.line,
                                                  expr.column));
@@ -1353,7 +1395,7 @@ Value evalGlobalInit(const Expr& expr,
         break;
     }
 
-    throw std::runtime_error(formatCompilerError("Top-level let initializer must be number/string/symbol name",
+    throwCompilerError(formatCompilerError("Top-level let initializer must be number/string/symbol name",
                                                  scopeName,
                                                  expr.line,
                                                  expr.column));
@@ -2092,7 +2134,7 @@ void compileExpr(const Expr& expr,
     }
     case ExprType::Unary:
         if (!expr.right) {
-            throw std::runtime_error(formatCompilerError("Unary expression is incomplete",
+            throwCompilerError(formatCompilerError("Unary expression is incomplete",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2109,7 +2151,7 @@ void compileExpr(const Expr& expr,
             emit(code, OpCode::BitwiseNot);
             break;
         default:
-            throw std::runtime_error(formatCompilerError("Unsupported unary operator",
+            throwCompilerError(formatCompilerError("Unsupported unary operator",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2117,7 +2159,7 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::AssignVariable: {
         if (!expr.right) {
-            throw std::runtime_error(formatCompilerError("Variable assignment expression is incomplete",
+            throwCompilerError(formatCompilerError("Variable assignment expression is incomplete",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2173,7 +2215,7 @@ void compileExpr(const Expr& expr,
     }
     case ExprType::AssignProperty:
         if (!expr.object || !expr.right) {
-            throw std::runtime_error(formatCompilerError("Property assignment expression is incomplete",
+            throwCompilerError(formatCompilerError("Property assignment expression is incomplete",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2184,7 +2226,7 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::AssignIndex:
         if (!expr.object || !expr.index || !expr.right) {
-            throw std::runtime_error(formatCompilerError("Index assignment expression is incomplete",
+            throwCompilerError(formatCompilerError("Index assignment expression is incomplete",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2288,7 +2330,7 @@ void compileExpr(const Expr& expr,
             }
             break;
         default:
-            throw std::runtime_error(formatCompilerError("Unsupported binary operator",
+            throwCompilerError(formatCompilerError("Unsupported binary operator",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2309,7 +2351,7 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::Call: {
         if (!expr.callee) {
-            throw std::runtime_error(formatCompilerError("Call expression callee is empty",
+            throwCompilerError(formatCompilerError("Call expression callee is empty",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2382,7 +2424,7 @@ void compileExpr(const Expr& expr,
     }
     case ExprType::MethodCall:
         if (!expr.object) {
-            throw std::runtime_error(formatCompilerError("Method call object is empty",
+            throwCompilerError(formatCompilerError("Method call object is empty",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2400,7 +2442,7 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::PropertyAccess:
         if (!expr.object) {
-            throw std::runtime_error(formatCompilerError("Property access object is empty",
+            throwCompilerError(formatCompilerError("Property access object is empty",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2410,7 +2452,7 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::IndexAccess:
         if (!expr.object || !expr.index) {
-            throw std::runtime_error(formatCompilerError("Index access expression is incomplete",
+            throwCompilerError(formatCompilerError("Index access expression is incomplete",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2421,13 +2463,13 @@ void compileExpr(const Expr& expr,
         return;
     case ExprType::Lambda: {
         if (!expr.lambdaDecl) {
-            throw std::runtime_error(formatCompilerError("Lambda declaration is missing",
+            throwCompilerError(formatCompilerError("Lambda declaration is missing",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
         }
         if (!g_mutableFuncIndex || !g_lambdaOrdinal || !g_allFunctionIrs) {
-            throw std::runtime_error(formatCompilerError("Internal compiler lambda context is not initialized",
+            throwCompilerError(formatCompilerError("Internal compiler lambda context is not initialized",
                                                          currentFunctionName,
                                                          expr.line,
                                                          expr.column));
@@ -2524,7 +2566,7 @@ void compileStatements(const std::vector<Stmt>& statements,
     auto compileCallLikeExprWithLoweredArgs = [&](const Expr& expr) -> bool {
         if (expr.type == ExprType::Call) {
             if (!expr.callee) {
-                throw std::runtime_error(formatCompilerError("Call expression callee is empty",
+                throwCompilerError(formatCompilerError("Call expression callee is empty",
                                                              currentFunctionName,
                                                              expr.line,
                                                              expr.column));
@@ -2590,7 +2632,7 @@ void compileStatements(const std::vector<Stmt>& statements,
 
         if (expr.type == ExprType::MethodCall) {
             if (!expr.object) {
-                throw std::runtime_error(formatCompilerError("Method call object is empty",
+                throwCompilerError(formatCompilerError("Method call object is empty",
                                                              currentFunctionName,
                                                              expr.line,
                                                              expr.column));
@@ -2751,7 +2793,7 @@ void compileStatements(const std::vector<Stmt>& statements,
                 }
             } else {
                 if (locals.contains(stmt.name)) {
-                    throw std::runtime_error(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
+                    throwCompilerError(formatCompilerError("Duplicate let declaration in scope: " + stmt.name,
                                                                  currentFunctionName,
                                                                  stmt.line,
                                                                  stmt.column));
@@ -2782,13 +2824,13 @@ void compileStatements(const std::vector<Stmt>& statements,
             break;
         }
         case StmtType::LetSpawn: {
-            throw std::runtime_error(formatCompilerError("'spawn' is temporarily disabled. Coroutine features are not enabled.",
+            throwCompilerError(formatCompilerError("'spawn' is temporarily disabled. Coroutine features are not enabled.",
                                                          currentFunctionName,
                                                          stmt.line,
                                                          stmt.column));
         }
         case StmtType::LetAwait: {
-            throw std::runtime_error(formatCompilerError("'await' is temporarily disabled. Coroutine features are not enabled.",
+            throwCompilerError(formatCompilerError("'await' is temporarily disabled. Coroutine features are not enabled.",
                                                          currentFunctionName,
                                                          stmt.line,
                                                          stmt.column));
@@ -3182,7 +3224,7 @@ void compileStatements(const std::vector<Stmt>& statements,
         }
         case StmtType::Break:
             if (!loopContext) {
-                throw std::runtime_error(formatCompilerError("'break' used outside of loop",
+                throwCompilerError(formatCompilerError("'break' used outside of loop",
                                                              currentFunctionName,
                                                              stmt.line,
                                                              stmt.column));
@@ -3191,7 +3233,7 @@ void compileStatements(const std::vector<Stmt>& statements,
             break;
         case StmtType::Continue:
             if (!loopContext) {
-                throw std::runtime_error(formatCompilerError("'continue' used outside of loop",
+                throwCompilerError(formatCompilerError("'continue' used outside of loop",
                                                              currentFunctionName,
                                                              stmt.line,
                                                              stmt.column));
@@ -3384,12 +3426,12 @@ void compileStatements(const std::vector<Stmt>& statements,
             emit(out.code, OpCode::Return);
             break;
         case StmtType::Sleep:
-            throw std::runtime_error(formatCompilerError("'sleep' is temporarily disabled. Coroutine features are not enabled.",
+            throwCompilerError(formatCompilerError("'sleep' is temporarily disabled. Coroutine features are not enabled.",
                                                          currentFunctionName,
                                                          stmt.line,
                                                          stmt.column));
         case StmtType::Yield:
-            throw std::runtime_error(formatCompilerError("'yield' is temporarily disabled. Coroutine features are not enabled.",
+            throwCompilerError(formatCompilerError("'yield' is temporarily disabled. Coroutine features are not enabled.",
                                                          currentFunctionName,
                                                          stmt.line,
                                                          stmt.column));
@@ -3424,7 +3466,7 @@ Module Compiler::compile(const Program& program) {
 
     for (const auto& cls : program.classes) {
         if (classIndex.contains(cls.name)) {
-            throw std::runtime_error(formatCompilerError("Duplicate class name: " + cls.name,
+            throwCompilerError(formatCompilerError("Duplicate class name: " + cls.name,
                                                          "<module>",
                                                          cls.line,
                                                          cls.column));
@@ -3437,7 +3479,7 @@ Module Compiler::compile(const Program& program) {
 
     for (const auto& fn : program.functions) {
         if (funcIndex.contains(fn.name)) {
-            throw std::runtime_error(formatCompilerError("Duplicate function name: " + fn.name,
+            throwCompilerError(formatCompilerError("Duplicate function name: " + fn.name,
                                                          "<module>",
                                                          fn.line,
                                                          fn.column));
@@ -3467,7 +3509,7 @@ Module Compiler::compile(const Program& program) {
         }
 
         if (funcIndex.contains(stmt.name) || classIndex.contains(stmt.name)) {
-            throw std::runtime_error(formatCompilerError("Duplicate top-level symbol name: " + stmt.name,
+            throwCompilerError(formatCompilerError("Duplicate top-level symbol name: " + stmt.name,
                                                          "<module>",
                                                          stmt.line,
                                                          stmt.column));
@@ -3537,7 +3579,7 @@ Module Compiler::compile(const Program& program) {
             if (method.name == "__new__") {
                 hasCtor = true;
                 if (method.params.empty()) {
-                    throw std::runtime_error(formatCompilerError("Class constructor __new__ must declare self parameter: " + cls.name,
+                    throwCompilerError(formatCompilerError("Class constructor __new__ must declare self parameter: " + cls.name,
                                                                  cls.name + "::__new__",
                                                                  method.line,
                                                                  method.column));
@@ -3546,7 +3588,7 @@ Module Compiler::compile(const Program& program) {
 
             const std::string mangled = mangleMethodName(cls.name, method.name);
             if (funcIndex.contains(mangled)) {
-                throw std::runtime_error(formatCompilerError("Duplicate method: " + mangled,
+                throwCompilerError(formatCompilerError("Duplicate method: " + mangled,
                                                              mangled,
                                                              method.line,
                                                              method.column));
@@ -3562,7 +3604,7 @@ Module Compiler::compile(const Program& program) {
         }
 
         if (!hasCtor) {
-            throw std::runtime_error(formatCompilerError("Class must define constructor __new__: " + cls.name,
+            throwCompilerError(formatCompilerError("Class must define constructor __new__: " + cls.name,
                                                          cls.name,
                                                          cls.line,
                                                          cls.column));
@@ -3690,7 +3732,9 @@ Module compileSource(const std::string& source) {
     Tokenizer tokenizer(source);
     Parser parser(tokenizer.tokenize());
     Compiler compiler;
-    return compiler.compile(parser.parseProgram());
+    Module module = compiler.compile(parser.parseProgram());
+    module.sourcePath = "<memory>";
+    return module;
 }
 
 void dumpTransformedSourceFile(const std::string& sourcePath, const std::string& transformedSource) {
@@ -3700,11 +3744,11 @@ void dumpTransformedSourceFile(const std::string& sourcePath, const std::string&
 
     std::ofstream output(outputPath, std::ios::binary);
     if (!output) {
-        throw std::runtime_error("error: failed to dump transformed source to " + outputPath.string() + " [function: <module>]");
+        throwCompilerError("error: failed to dump transformed source to " + outputPath.string() + " [function: <module>]");
     }
     output << transformedSource;
     if (!output) {
-        throw std::runtime_error("error: failed to write transformed source to " + outputPath.string() + " [function: <module>]");
+        throwCompilerError("error: failed to write transformed source to " + outputPath.string() + " [function: <module>]");
     }
 }
 
@@ -3789,12 +3833,15 @@ Module compileSourceFile(const std::string& path,
         Parser parser(tokenizer.tokenize());
         Compiler compiler;
         Module module = compiler.compile(parser.parseProgram());
+        module.sourcePath = std::filesystem::weakly_canonical(path).string();
         if (g_compileDisassemblyDumpEnabled) {
             dumpCompilerDebugFiles(path, module, compiler.lastFunctionIR());
         }
         return module;
+    } catch (const CompilerException& ex) {
+        throwCompilerError(path, tryFillFunctionContext(ex.what(), mergedSource));
     } catch (const std::exception& ex) {
-        throw std::runtime_error(path + ":" + tryFillFunctionContext(ex.what(), mergedSource));
+        throwCompilerError(path, tryFillFunctionContext(ex.what(), mergedSource));
     }
 }
 
@@ -3867,7 +3914,7 @@ Module deserializeModuleText(const std::string& text) {
     std::string magic;
     std::getline(in, magic);
     if (magic != "GSBC1") {
-        throw std::runtime_error("Invalid bytecode header");
+        throwCompilerError("Invalid bytecode header");
     }
 
     Module module;
@@ -4001,7 +4048,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             out << "gs::Value::String(" << c.payload << ")";
             break;
         case ValueType::Ref:
-            throw std::runtime_error("AOT generation does not support runtime Ref values in constants");
+            throwCompilerError("AOT generation does not support runtime Ref values in constants");
         case ValueType::Function:
             out << "gs::Value::Function(" << c.payload << ")";
             break;
@@ -4076,7 +4123,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
                 out << "gs::Value::String(" << attr.defaultValue.payload << ")";
                 break;
             case ValueType::Ref:
-                throw std::runtime_error("AOT generation does not support runtime Ref values in class attributes");
+                throwCompilerError("AOT generation does not support runtime Ref values in class attributes");
                 break;
             case ValueType::Function:
                 out << "gs::Value::Function(" << attr.defaultValue.payload << ")";
@@ -4115,7 +4162,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             out << "gs::Value::String(" << global.initialValue.payload << ")";
             break;
         case ValueType::Ref:
-            throw std::runtime_error("AOT generation does not support runtime Ref values in globals");
+            throwCompilerError("AOT generation does not support runtime Ref values in globals");
             break;
         case ValueType::Function:
             out << "gs::Value::Function(" << global.initialValue.payload << ")";

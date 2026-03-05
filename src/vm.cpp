@@ -613,6 +613,39 @@ std::vector<ExceptionStackFrame> captureExceptionTopFrame(const ExecutionContext
     return {};
 }
 
+struct ExceptionThrowSite {
+    std::string functionName;
+    std::size_t line{0};
+    std::size_t column{0};
+    std::size_t offset{0};
+    bool valid{false};
+};
+
+ExceptionThrowSite tryGetExceptionThrowSite(ExecutionContext& context, const Value& value) {
+    ExceptionThrowSite out;
+    if (!value.isRef()) {
+        return out;
+    }
+
+    Object* object = value.asRef();
+    if (!object || !context.objectPtrToId.contains(object)) {
+        return out;
+    }
+
+    auto* exception = dynamic_cast<ExceptionObject*>(object);
+    if (!exception || !exception->hasStackTrace() || exception->stackTrace().empty()) {
+        return out;
+    }
+
+    const auto& frame = exception->stackTrace().front();
+    out.functionName = frame.functionName;
+    out.line = frame.line;
+    out.column = frame.column;
+    out.offset = frame.ip;
+    out.valid = true;
+    return out;
+}
+
 bool fullExceptionTraceEnabled() {
     static const bool enabled = []() {
         const char* mode = std::getenv("GS_EXCEPTION_TRACE_MODE");
@@ -4007,7 +4040,8 @@ call_method_done:
                                                                      exceptionName,
                                                                      message);
             if (!dispatchException(mappedException)) {
-                throw;
+                attachThrowSiteIfException(context, mappedException);
+                throw ScriptThrownException(mappedException);
             }
             continue;
         }
@@ -4048,6 +4082,7 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
         return ctx.returnValue;
     } catch (const ScriptThrownException& e) {
         ensureFullStackTraceIfException(ctx, e.value());
+        const ExceptionThrowSite throwSite = tryGetExceptionThrowSite(ctx, e.value());
 
         std::vector<std::string> callStack;
         for (std::size_t frameIndex = 0; frameIndex < ctx.frames.size(); ++frameIndex) {
@@ -4055,17 +4090,38 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
             if (frame.modulePin) {
                 const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
                 const SourceLocation location = resolveFrameSourceLocation(frame);
-                callStack.push_back(fn.name + " (line " + std::to_string(location.line) + ", column " + std::to_string(location.column) + ", ip=" + std::to_string(frame.ip) + ")");
+                const std::string sourceFile = frame.modulePin->sourcePath.empty() ? "<unknown>" : frame.modulePin->sourcePath;
+                callStack.push_back(
+                    "file=" + sourceFile + ", function=" + fn.name +
+                    ", line=" + std::to_string(location.line) +
+                    ", column=" + std::to_string(location.column) +
+                    ", offset=" + std::to_string(frame.ip));
             }
         }
+        if (callStack.empty()) {
+            const std::string sourceFile = module_ && !module_->sourcePath.empty() ? module_->sourcePath : "<unknown>";
+            const std::string fallbackFunction = throwSite.valid && !throwSite.functionName.empty() ? throwSite.functionName : functionName;
+            const std::size_t fallbackLine = throwSite.valid ? throwSite.line : 0;
+            const std::size_t fallbackColumn = throwSite.valid ? throwSite.column : 0;
+            const std::size_t fallbackOffset = throwSite.valid ? throwSite.offset : 0;
+            callStack.push_back(
+                "file=" + sourceFile +
+                ", function=" + fallbackFunction +
+                ", line=" + std::to_string(fallbackLine) +
+                ", column=" + std::to_string(fallbackColumn) +
+                ", offset=" + std::to_string(fallbackOffset));
+        }
 
-        std::string currentFn = ctx.frames.empty() ? functionName :
-            ctx.frames.back().modulePin->functions.at(ctx.frames.back().functionIndex).name;
+        std::string currentFn = ctx.frames.empty()
+            ? (throwSite.valid && !throwSite.functionName.empty() ? throwSite.functionName : functionName)
+            : ctx.frames.back().modulePin->functions.at(ctx.frames.back().functionIndex).name;
 
         std::size_t currentLine = 0;
         if (!ctx.frames.empty()) {
             const auto& currentFrame = ctx.frames.back();
             currentLine = resolveFrameSourceLocation(currentFrame).line;
+        } else if (throwSite.valid) {
+            currentLine = throwSite.line;
         }
 
         ErrorLogger::instance().logVmError(
@@ -4085,8 +4141,17 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
             if (frame.modulePin) {
                 const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
                 const SourceLocation location = resolveFrameSourceLocation(frame);
-                callStack.push_back(fn.name + " (line " + std::to_string(location.line) + ", column " + std::to_string(location.column) + ", ip=" + std::to_string(frame.ip) + ")");
+                const std::string sourceFile = frame.modulePin->sourcePath.empty() ? "<unknown>" : frame.modulePin->sourcePath;
+                callStack.push_back(
+                    "file=" + sourceFile + ", function=" + fn.name +
+                    ", line=" + std::to_string(location.line) +
+                    ", column=" + std::to_string(location.column) +
+                    ", offset=" + std::to_string(frame.ip));
             }
+        }
+        if (callStack.empty()) {
+            const std::string sourceFile = module_ && !module_->sourcePath.empty() ? module_->sourcePath : "<unknown>";
+            callStack.push_back("file=" + sourceFile + ", function=" + functionName + ", line=0, column=0, offset=0");
         }
         
         // Get current function name and line

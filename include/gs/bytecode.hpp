@@ -322,6 +322,7 @@ struct GlobalBinding {
 };
 
 struct Module {
+    std::string sourcePath;
     std::vector<Value> constants;
     std::vector<std::string> strings;
     std::vector<FunctionBytecode> functions;
