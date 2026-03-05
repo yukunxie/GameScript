@@ -186,6 +186,14 @@ class CountingDict extends Dict {
     }
 }
 
+class PrettyRecord {
+    fn __new__(self, tag) {
+        self.tag = tag;
+        # Runtime currently reads instance field __str__ as custom display value.
+        self.__str__ = "PrettyRecord(" + tag + ")";
+    }
+}
+
 fn test_native_dict_inheritance() {
     let d = CountingDict();
     d[1] = 10;
@@ -197,6 +205,30 @@ fn test_native_dict_inheritance() {
     assert(d.size() == 2, "CountingDict size expected 2, actual {}", d.size());
     assert(typename(d) == "CountingDict", "CountingDict typename expected CountingDict, actual {}", typename(d));
     assert(1 in d, "CountingDict membership expected key 1 in dict");
+    return 1;
+}
+
+fn test_script_str_and_json_output() {
+    let rec = PrettyRecord("demo");
+    let recText = str(rec);
+    assert(recText == "PrettyRecord(demo)", "PrettyRecord __str__ expected PrettyRecord(demo), actual {}", recText);
+
+    let payload = {
+        "id": 7,
+        "name": "demo",
+        "obj": rec,
+        "nums": [2, 3, 5]
+    };
+    let out = str(payload);
+    print("JSON output:", out);
+    assert(out.contains("\"id\":7"), "json output missing id field: {}", out);
+    assert(out.contains("\"obj\":\"PrettyRecord(demo)\""), "json output missing object string: {}", out);
+    assert(out.contains("\"nums\":[2,3,5]"), "json output missing list field: {}", out);
+
+    let circular = {};
+    circular["self"] = circular;
+    let circularOut = str(circular);
+    assert(circularOut.contains("[Circular]"), "circular dict output missing marker: {}", circularOut);
     return 1;
 }
 
@@ -228,6 +260,10 @@ class BenchmarkSuite {
         for (index in range(0, self.testNames.size())) {
             let name = self.testNames[index];
             let fn_ = self.testFns[index];
+            let fnType = typename(fn_);
+            if (fnType != "Function") {
+                assert(0, "benchmark entry {} expected Function, actual {}", name, fnType);
+            }
             
             # Warm up
             fn_();
@@ -585,29 +621,212 @@ fn benchmark_exception_engine() {
     return checksum;
 }
 
+fn benchmark_script_str_and_json() {
+    let iterations = 50;
+    let checksum = 0;
+    for (i in range(0, iterations)) {
+        let rec = PrettyRecord(str(i));
+        let payload = {
+            "obj": rec,
+            "nums": [i, i + 1],
+            "meta": {"x": i}
+        };
+        let out = str(payload);
+
+        if (out.contains("\"obj\":\"PrettyRecord(")) {
+            checksum = checksum + 1;
+        }
+        if (out.contains("\"nums\":[")) {
+            checksum = checksum + 1;
+        }
+        if (out.contains("\"meta\":{")) {
+            checksum = checksum + 1;
+        }
+        if (out.contains("\"x\":")) {
+            checksum = checksum + 1;
+        }
+    }
+
+    assert(checksum >= iterations * 3, "script-str/json benchmark checksum too low: {}", checksum);
+    return checksum;
+}
+
 # ============================================================================
 # Run Performance Benchmark Suite
 # ============================================================================
 
 fn run_performance_benchmark() {
-    print("[DEBUG] Creating BenchmarkSuite...");
-    let suite = BenchmarkSuite();
-    print("[DEBUG] BenchmarkSuite created, adding tests...");
-    
-    suite.add("Hot Loop (10K iterations)", benchmark_hot_loop);
-    suite.add("Module Calls (2K calls)", benchmark_module_calls);
-    suite.add("Iterator Traversal (List/Tuple/Dict)", benchmark_iter_traversal);
-    suite.add("Vec2 Operations (1K ops)", benchmark_vec2_operations);
-    suite.add("Entity Creation (100 entities)", benchmark_entity_creation);
-    suite.add("String Operations (500 ops)", benchmark_string_operations);
-    suite.add("Lambda Creation (1K lambdas)", benchmark_lambda_creation);
-    suite.add("Operators (bitwise/logical/etc)", benchmark_operators);
-    suite.add("Lambda Closures (complex)", benchmark_lambda_closures);
-    suite.add("Printf Operations", benchmark_printf);
-    suite.add("Native Dict Inheritance", benchmark_native_dict_inheritance);
-    suite.add("Exception Engine", benchmark_exception_engine);
-    
-    let results = suite.run();
+    print("================================================================================");
+    print("                      GameScript Performance Benchmark");
+    print("================================================================================");
+    print("");
+
+    let results = [];
+    let totalTime = 0;
+    let totalOps = 0;
+    let iterations = 10;
+
+    # Hot Loop
+    benchmark_hot_loop();
+    let startTime = system.getTimeMs();
+    let checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_hot_loop();
+    }
+    let elapsed = system.getTimeMs() - startTime;
+    let avgTime = elapsed / iterations;
+    results.push({"name": "Hot Loop (10K iterations)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Hot Loop (10K iterations)", avgTime, iterations);
+
+    # Module Calls
+    benchmark_module_calls();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_module_calls();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Module Calls (2K calls)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Module Calls (2K calls)", avgTime, iterations);
+
+    # Iterator Traversal
+    benchmark_iter_traversal();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_iter_traversal();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Iterator Traversal (List/Tuple/Dict)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Iterator Traversal (List/Tuple/Dict)", avgTime, iterations);
+
+    # Vec2 Operations
+    benchmark_vec2_operations();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_vec2_operations();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Vec2 Operations (1K ops)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Vec2 Operations (1K ops)", avgTime, iterations);
+
+    # Entity Creation
+    benchmark_entity_creation();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_entity_creation();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Entity Creation (100 entities)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Entity Creation (100 entities)", avgTime, iterations);
+
+    # String Operations
+    benchmark_string_operations();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_string_operations();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "String Operations (500 ops)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "String Operations (500 ops)", avgTime, iterations);
+
+    # Lambda Creation
+    benchmark_lambda_creation();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_lambda_creation();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Lambda Creation (1K lambdas)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Lambda Creation (1K lambdas)", avgTime, iterations);
+
+    # Operators
+    benchmark_operators();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_operators();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Operators (bitwise/logical/etc)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Operators (bitwise/logical/etc)", avgTime, iterations);
+
+    # Lambda Closures
+    benchmark_lambda_closures();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_lambda_closures();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Lambda Closures (complex)", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Lambda Closures (complex)", avgTime, iterations);
+
+    # Native Dict Inheritance
+    benchmark_native_dict_inheritance();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_native_dict_inheritance();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Native Dict Inheritance", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Native Dict Inheritance", avgTime, iterations);
+
+    # Exception Engine
+    benchmark_exception_engine();
+    startTime = system.getTimeMs();
+    checksum = 0;
+    for (i in range(0, iterations)) {
+        checksum = checksum + benchmark_exception_engine();
+    }
+    elapsed = system.getTimeMs() - startTime;
+    avgTime = elapsed / iterations;
+    results.push({"name": "Exception Engine", "avgTime": avgTime, "iterations": iterations, "checksum": checksum});
+    totalTime = totalTime + elapsed;
+    totalOps = totalOps + iterations;
+    printf("  %s: %.2f ms/op  (%d iter)\\n", "Exception Engine", avgTime, iterations);
+
+    print("");
+    print("--------------------------------------------------------------------------------");
+    printf("  Total time: %.2f ms\\n", totalTime);
+    printf("  Total operations: %d\\n", totalOps);
+    printf("  Average time per test: %.2f ms\\n", totalTime / results.size());
+    print("================================================================================");
+    print("");
     
     # GC test
     let reclaimed = system.gc();
@@ -637,6 +856,7 @@ fn run_bench(verbose) {
     passed = passed + test_modules_and_imports();
     passed = passed + test_classes_and_host_objects();
     passed = passed + test_native_dict_inheritance();
+    passed = passed + test_script_str_and_json_output();
 
     let checksum1 = benchmark_hot_loop();
     let checksum2 = benchmark_module_calls();
@@ -647,6 +867,7 @@ fn run_bench(verbose) {
     let checksum7 = benchmark_string_object_operations();
     let checksum8 = benchmark_native_dict_inheritance();
     let checksum9 = benchmark_exception_engine();
+    let checksum10 = benchmark_script_str_and_json();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
@@ -668,12 +889,13 @@ fn run_bench(verbose) {
         print("[bench] checksum7 (string-object)", checksum7);
         print("[bench] checksum8 (native-dict-inherit)", checksum8);
         print("[bench] checksum9 (exception-engine)", checksum9);
+        print("[bench] checksum10 (script-str-json)", checksum10);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
-    assert(passed == 7, "passed groups expected 7, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + checksum8 + checksum9 + reclaimed;
+    assert(passed == 8, "passed groups expected 8, actual {}", passed);
+    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + checksum8 + checksum9 + checksum10 + reclaimed;
 }
 
 fn ue_entry() {

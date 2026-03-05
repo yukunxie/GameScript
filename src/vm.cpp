@@ -91,6 +91,9 @@ bool tryExtractStringData(const ExecutionContext& context, const Value& value, s
 std::string __str__ValueImpl(const ExecutionContext& context,
                              const Value& value,
                              std::unordered_set<std::uint64_t>& visitingRefs);
+std::string __str__RefObject(const ExecutionContext& context,
+                             Object* object,
+                             std::unordered_set<std::uint64_t>& visitingRefs);
 
 std::uint64_t nextGlobalObjectId() {
     static std::atomic<std::uint64_t> nextId{1};
@@ -163,6 +166,186 @@ private:
     std::int32_t scriptBaseClassIndex_{-1};
     Value nativeBaseRef_{Value::Nil()};
 };
+
+class ImmediateValueObject final : public Object {
+public:
+    ImmediateValueObject(const Type& typeRef,
+                         const ExecutionContext& context,
+                         Value value,
+                         std::unordered_set<std::uint64_t>* visitingRefs = nullptr)
+        : type_(&typeRef), context_(&context), value_(value), visitingRefs_(visitingRefs) {}
+
+    const Type& getType() const override {
+        return *type_;
+    }
+
+    const ExecutionContext& context() const {
+        return *context_;
+    }
+
+    const Value& value() const {
+        return value_;
+    }
+
+    std::unordered_set<std::uint64_t>& visitingRefs() const {
+        if (!visitingRefs_) {
+            throw std::runtime_error("Immediate value stringification missing recursion context");
+        }
+        return *visitingRefs_;
+    }
+
+private:
+    const Type* type_;
+    const ExecutionContext* context_;
+    Value value_;
+    std::unordered_set<std::uint64_t>* visitingRefs_;
+};
+
+ImmediateValueObject& requireImmediateValueObject(Object& self) {
+    auto* object = dynamic_cast<ImmediateValueObject*>(&self);
+    if (!object) {
+        throw std::runtime_error("Immediate value stringification received non-immediate object");
+    }
+    return *object;
+}
+
+class NilValueType final : public Type {
+public:
+    const char* name() const override { return "Nil"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)self;
+        (void)valueStr;
+        return "null";
+    }
+};
+
+class BoolValueType final : public Type {
+public:
+    const char* name() const override { return "Bool"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)valueStr;
+        auto& object = requireImmediateValueObject(self);
+        return object.value().asBool() ? "true" : "false";
+    }
+};
+
+class IntValueType final : public Type {
+public:
+    const char* name() const override { return "Int"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)valueStr;
+        auto& object = requireImmediateValueObject(self);
+        return std::to_string(object.value().asInt());
+    }
+};
+
+class FloatValueType final : public Type {
+public:
+    const char* name() const override { return "Float"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)valueStr;
+        auto& object = requireImmediateValueObject(self);
+        std::ostringstream out;
+        out << std::setprecision(17) << object.value().asFloat();
+        return out.str();
+    }
+};
+
+class LegacyStringLiteralValueType final : public Type {
+public:
+    const char* name() const override { return "StringLiteral"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)valueStr;
+        auto& object = requireImmediateValueObject(self);
+        return getString(object.context(), object.value());
+    }
+};
+
+class FunctionValueType final : public Type {
+public:
+    const char* name() const override { return "Function"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)self;
+        (void)valueStr;
+        return "[Function]";
+    }
+};
+
+class ClassValueType final : public Type {
+public:
+    const char* name() const override { return "Class"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)self;
+        (void)valueStr;
+        return "[Class]";
+    }
+};
+
+class ModuleValueType final : public Type {
+public:
+    const char* name() const override { return "Module"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)self;
+        (void)valueStr;
+        return "[Module]";
+    }
+};
+
+class RefValueType final : public Type {
+public:
+    const char* name() const override { return "Ref"; }
+    std::string __str__(Object& self, const ValueStrInvoker& valueStr) const override {
+        (void)valueStr;
+        auto& object = requireImmediateValueObject(self);
+        return __str__RefObject(object.context(), object.value().asRef(), object.visitingRefs());
+    }
+};
+
+const Type& immediateValueTypeOf(const Value& value) {
+    static NilValueType nilType;
+    static BoolValueType boolType;
+    static IntValueType intType;
+    static FloatValueType floatType;
+    static LegacyStringLiteralValueType stringLiteralType;
+    static FunctionValueType functionType;
+    static ClassValueType classType;
+    static ModuleValueType moduleType;
+    static RefValueType refType;
+
+    switch (value.type) {
+    case ValueType::Nil:
+        return nilType;
+    case ValueType::Bool:
+        return boolType;
+    case ValueType::Int:
+        return intType;
+    case ValueType::Float:
+        return floatType;
+    case ValueType::String:
+        return stringLiteralType;
+    case ValueType::Function:
+        return functionType;
+    case ValueType::Class:
+        return classType;
+    case ValueType::Module:
+        return moduleType;
+    case ValueType::Ref:
+        return refType;
+    }
+
+    throw std::runtime_error("Unknown immediate value type");
+}
+
+std::string __str__ImmediateValue(const ExecutionContext& context,
+                                  const Value& value,
+                                  std::unordered_set<std::uint64_t>& visitingRefs) {
+    const Type& type = immediateValueTypeOf(value);
+    ImmediateValueObject object(type, context, value, &visitingRefs);
+    const auto valueStr = [&](const Value& nested) {
+        return __str__ValueImpl(context, nested, visitingRefs);
+    };
+    return type.__str__(object, valueStr);
+}
 
 Value emplaceObject(ExecutionContext& context, std::unique_ptr<Object> object);
 
@@ -1013,7 +1196,7 @@ std::string __str__RefObject(const ExecutionContext& context,
     const auto valueStr = [&](const Value& nested) {
         return __str__ValueImpl(context, nested, visitingRefs);
     };
-    std::string out = object->getType().__str__(*object, valueStr);
+    std::string out = object->__str__(valueStr);
 
     visitingRefs.erase(objectId);
     return out;
@@ -1022,33 +1205,7 @@ std::string __str__RefObject(const ExecutionContext& context,
 std::string __str__ValueImpl(const ExecutionContext& context,
                              const Value& value,
                              std::unordered_set<std::uint64_t>& visitingRefs) {
-    std::string stringData;
-    if (tryExtractStringData(context, value, stringData)) {
-        return stringData;
-    }
-
-    switch (value.type) {
-    case ValueType::Nil:
-        return "null";
-    case ValueType::Bool:
-        return value.asBool() ? "true" : "false";
-    case ValueType::Int:
-        return std::to_string(value.asInt());
-    case ValueType::Float: {
-        std::ostringstream out;
-        out << std::setprecision(17) << value.asFloat();
-        return out.str();
-    }
-    case ValueType::Ref:
-        return __str__RefObject(context, value.asRef(), visitingRefs);
-    case ValueType::Function:
-        return "[Function]";
-    case ValueType::Class:
-        return "[Class]";
-    case ValueType::Module:
-        return "[Module]";
-    }
-    return "";
+    return __str__ImmediateValue(context, value, visitingRefs);
 }
 
 std::string __str__Value(const ExecutionContext& context, const Value& value) {

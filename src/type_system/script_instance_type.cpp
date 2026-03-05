@@ -85,7 +85,11 @@ std::string ScriptInstanceType::__str__(Object& self, const ValueStrInvoker& val
         throw std::runtime_error("ScriptInstanceType called with non-instance object");
     }
 
-    (void)valueStr;
+    auto it = instance->fields().find("__str__");
+    if (it != instance->fields().end()) {
+        return valueStr(it->second);
+    }
+
     return instance->className() + "#" + std::to_string(instance->objectId());
 }
 

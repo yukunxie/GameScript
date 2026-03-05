@@ -1,10 +1,125 @@
 #include "gs/type_system/dict_type.hpp"
+#include "gs/type_system/list_type.hpp"
+#include "gs/type_system/string_type.hpp"
 
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace gs {
+
+namespace {
+
+std::string escapeJson(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() + 8);
+    for (const char ch : text) {
+        switch (ch) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            out += ch;
+            break;
+        }
+    }
+    return out;
+}
+
+std::string toJsonValue(const Value& value,
+                        const Type::ValueStrInvoker& valueStr,
+                        std::unordered_set<const Object*>& visiting);
+
+std::string toJsonObject(const DictObject& dict,
+                         const Type::ValueStrInvoker& valueStr,
+                         std::unordered_set<const Object*>& visiting) {
+    std::ostringstream ss;
+    ss << "{";
+    bool first = true;
+    for (const auto& kv : dict.data()) {
+        if (!first) {
+            ss << ",";
+        }
+        first = false;
+        ss << "\"" << escapeJson(valueStr(kv.first)) << "\":"
+           << toJsonValue(kv.second, valueStr, visiting);
+    }
+    ss << "}";
+    return ss.str();
+}
+
+std::string toJsonArray(const ListObject& list,
+                        const Type::ValueStrInvoker& valueStr,
+                        std::unordered_set<const Object*>& visiting) {
+    std::ostringstream ss;
+    ss << "[";
+    for (std::size_t i = 0; i < list.data().size(); ++i) {
+        if (i > 0) {
+            ss << ",";
+        }
+        ss << toJsonValue(list.data()[i], valueStr, visiting);
+    }
+    ss << "]";
+    return ss.str();
+}
+
+std::string toJsonValue(const Value& value,
+                        const Type::ValueStrInvoker& valueStr,
+                        std::unordered_set<const Object*>& visiting) {
+    if (value.isNil()) {
+        return "null";
+    }
+    if (value.isBool()) {
+        return value.asBool() ? "true" : "false";
+    }
+    if (value.isInt()) {
+        return std::to_string(value.asInt());
+    }
+    if (value.isFloat()) {
+        std::ostringstream out;
+        out << value.asFloat();
+        return out.str();
+    }
+    if (value.isString() || value.isLegacyStringLiteral()) {
+        return "\"" + escapeJson(valueStr(value)) + "\"";
+    }
+    if (value.isRef()) {
+        Object* object = value.asRef();
+        if (!object) {
+            return "null";
+        }
+        if (auto* stringObject = dynamic_cast<StringObject*>(object)) {
+            return "\"" + escapeJson(stringObject->data()) + "\"";
+        }
+        if (visiting.contains(object)) {
+            return "\"[Circular]\"";
+        }
+
+        if (auto* dictObject = dynamic_cast<DictObject*>(object)) {
+            visiting.insert(object);
+            const std::string out = toJsonObject(*dictObject, valueStr, visiting);
+            visiting.erase(object);
+            return out;
+        }
+        if (auto* listObject = dynamic_cast<ListObject*>(object)) {
+            visiting.insert(object);
+            const std::string out = toJsonArray(*listObject, valueStr, visiting);
+            visiting.erase(object);
+            return out;
+        }
+
+        return "\"" + escapeJson(valueStr(value)) + "\"";
+    }
+
+    return "\"" + escapeJson(valueStr(value)) + "\"";
+}
+
+} // namespace
 
 DictObject::DictObject(const Type& typeRef) : type_(&typeRef) {}
 
@@ -80,18 +195,9 @@ Value DictType::setMember(Object& self, const std::string& member, const Value& 
 
 std::string DictType::__str__(Object& self, const ValueStrInvoker& valueStr) const {
     auto& dict = requireDict(self);
-    std::ostringstream ss;
-    ss << "{";
-    bool first = true;
-    for (const auto& kv : dict.data()) {
-        if (!first) {
-            ss << ", ";
-        }
-        first = false;
-        ss << valueStr(kv.first) << ": " << valueStr(kv.second);
-    }
-    ss << "}";
-    return ss.str();
+    std::unordered_set<const Object*> visiting;
+    visiting.insert(&dict);
+    return toJsonObject(dict, valueStr, visiting);
 }
 
 DictObject& DictType::requireDict(Object& self) {

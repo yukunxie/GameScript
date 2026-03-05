@@ -56,6 +56,9 @@ class Object {
 public:
     virtual ~Object() = default;
     virtual const Type& getType() const = 0;
+    virtual std::string __str__(const Type::ValueStrInvoker& valueStr) const {
+        return getType().__str__(const_cast<Object&>(*this), valueStr);
+    }
     void setObjectId(std::uint64_t id) { objectId_ = id; }
     std::uint64_t objectId() const { return objectId_; }
     void setProtoRef(const Value& protoRef) { protoRef_ = protoRef; }
