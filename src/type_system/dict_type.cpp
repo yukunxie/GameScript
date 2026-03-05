@@ -114,7 +114,7 @@ Value DictType::methodGet(Object& self, const std::vector<Value>& args) const {
     const Value& key = args[0];
     auto it = dict.data().find(key);
     if (it == dict.data().end()) {
-        return Value::Nil();
+        throw std::runtime_error("Dict key not found");
     }
     return it->second;
 }
@@ -124,7 +124,7 @@ Value DictType::methodDel(Object& self, const std::vector<Value>& args) const {
     const Value& key = args[0];
     auto it = dict.data().find(key);
     if (it == dict.data().end()) {
-        return Value::Nil();
+        throw std::runtime_error("Dict key not found");
     }
     Value removed = it->second;
     dict.data().erase(it);

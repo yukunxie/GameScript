@@ -14,3 +14,4 @@
 #include "gs/type_system/script_instance_type.hpp"
 #include "gs/type_system/upvalue_cell_type.hpp"
 #include "gs/type_system/type_object_type.hpp"
+#include "gs/type_system/exception_type.hpp"

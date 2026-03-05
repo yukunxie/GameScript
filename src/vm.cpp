@@ -9,12 +9,14 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,7 +81,7 @@ bool tryExtractStringData(const ExecutionContext& context, const Value& value, s
         out = stringObject->data();
         return true;
     }
-    if (value.isString()) {
+    if (value.isLegacyStringLiteral()) {
         out = getString(context, value);
         return true;
     }
@@ -108,6 +110,22 @@ bool tryGetObjectId(const ExecutionContext& context, Object* object, std::uint64
     outId = it->second;
     return true;
 }
+
+class ScriptThrownException final : public std::exception {
+public:
+    explicit ScriptThrownException(Value value) : value_(value) {}
+
+    const char* what() const noexcept override {
+        return "script throw";
+    }
+
+    const Value& value() const {
+        return value_;
+    }
+
+private:
+    Value value_;
+};
 
 class SuperProxyType final : public Type {
 public:
@@ -198,7 +216,8 @@ Value ensureScriptClassTypeObject(ExecutionContext& context,
                                   ScriptInstanceType& instanceType,
                                   DictType& dictType,
                                   ListType& listType,
-                                  StringType& stringType) {
+                                  StringType& stringType,
+                                  ExceptionType& exceptionType) {
     if (classIndex >= module.classes.size()) {
         throw std::runtime_error("Class index out of range for TypeObject creation");
     }
@@ -213,15 +232,26 @@ Value ensureScriptClassTypeObject(ExecutionContext& context,
                                                   instanceType,
                                                   dictType,
                                                   listType,
-                                                  stringType);
+                                                  stringType,
+                                                  exceptionType);
     } else if (!cls.baseNativeTypeName.empty()) {
         const Type* nativeType = nullptr;
+        Value nativeBaseTypeRef = Value::Nil();
         if (cls.baseNativeTypeName == "Dict") {
             nativeType = &dictType;
         } else if (cls.baseNativeTypeName == "List") {
             nativeType = &listType;
         } else if (cls.baseNativeTypeName == "String") {
             nativeType = &stringType;
+        } else if (isNativeExceptionTypeName(cls.baseNativeTypeName)) {
+            nativeType = &exceptionType;
+            if (cls.baseNativeTypeName != kExceptionTypeName) {
+                nativeBaseTypeRef = getOrCreateModuleTypeObject(context,
+                                                                modulePin,
+                                                                std::string(kExceptionTypeName),
+                                                                exceptionType,
+                                                                Value::Nil());
+            }
         } else {
             nativeType = &instanceType;
         }
@@ -229,7 +259,7 @@ Value ensureScriptClassTypeObject(ExecutionContext& context,
                                                   modulePin,
                                                   cls.baseNativeTypeName,
                                                   *nativeType,
-                                                  Value::Nil());
+                                                  nativeBaseTypeRef);
     }
 
     return getOrCreateModuleTypeObject(context,
@@ -245,7 +275,8 @@ Value ensureObjectProto(ExecutionContext& context,
                        ScriptInstanceType& instanceType,
                        DictType& dictType,
                        ListType& listType,
-                       StringType& stringType) {
+                       StringType& stringType,
+                       ExceptionType& exceptionType) {
     if (object.protoRef().isRef()) {
         return object.protoRef();
     }
@@ -260,10 +291,31 @@ Value ensureObjectProto(ExecutionContext& context,
                                                               instanceType,
                                                               dictType,
                                                               listType,
-                                                              stringType);
+                                                              stringType,
+                                                              exceptionType);
             object.setProtoRef(typeObjectRef);
             return typeObjectRef;
         }
+    }
+
+    if (auto* exception = dynamic_cast<ExceptionObject*>(&object)) {
+        Value exceptionTypeRef = getOrCreateModuleTypeObject(context,
+                                                             modulePin,
+                                                             std::string(kExceptionTypeName),
+                                                             exceptionType,
+                                                             Value::Nil());
+        if (exception->exceptionName() == kExceptionTypeName) {
+            object.setProtoRef(exceptionTypeRef);
+            return exceptionTypeRef;
+        }
+
+        Value exceptionDerivedTypeRef = getOrCreateModuleTypeObject(context,
+                                                                    modulePin,
+                                                                    exception->exceptionName(),
+                                                                    exceptionType,
+                                                                    exceptionTypeRef);
+        object.setProtoRef(exceptionDerivedTypeRef);
+        return exceptionDerivedTypeRef;
     }
 
     const Type& runtimeType = object.getType();
@@ -297,49 +349,250 @@ Value ensureObjectProto(ExecutionContext& context,
     return proto;
 }
 
-std::size_t resolveFrameSourceLine(const Frame& frame) {
+struct SourceLocation {
+    std::size_t line{0};
+    std::size_t column{0};
+};
+
+SourceLocation resolveFrameSourceLocation(const Frame& frame) {
     if (!frame.modulePin) {
-        return 0;
+        return {};
     }
 
     const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
     if (fn.code.empty()) {
-        return 0;
+        return {};
     }
 
-    const auto tryLineAt = [&](std::size_t index) -> std::size_t {
+    const auto tryLocationAt = [&](std::size_t index) -> SourceLocation {
         if (index >= fn.code.size()) {
-            return 0;
+            return {};
         }
-        const std::size_t line = fn.code[index].line;
-        return line > 0 ? line : 0;
+        const auto& ins = fn.code[index];
+        if (ins.line == 0) {
+            return {};
+        }
+        return SourceLocation{ins.line, ins.column};
     };
 
     if (frame.ip > 0) {
-        if (const std::size_t line = tryLineAt(frame.ip - 1); line > 0) {
-            return line;
+        if (const SourceLocation location = tryLocationAt(frame.ip - 1); location.line > 0) {
+            return location;
         }
     }
 
-    if (const std::size_t line = tryLineAt(frame.ip); line > 0) {
-        return line;
+    if (const SourceLocation location = tryLocationAt(frame.ip); location.line > 0) {
+        return location;
     }
 
     std::size_t index = std::min(frame.ip, fn.code.size());
     while (index > 0) {
         --index;
-        if (const std::size_t line = tryLineAt(index); line > 0) {
-            return line;
+        if (const SourceLocation location = tryLocationAt(index); location.line > 0) {
+            return location;
         }
     }
 
     for (const auto& instruction : fn.code) {
         if (instruction.line > 0) {
-            return instruction.line;
+            return SourceLocation{instruction.line, instruction.column};
         }
     }
 
-    return 0;
+    return {};
+}
+
+std::vector<ExceptionStackFrame> captureExceptionStackTrace(const ExecutionContext& context) {
+    std::vector<ExceptionStackFrame> stackTrace;
+    stackTrace.reserve(context.frames.size());
+    for (auto it = context.frames.rbegin(); it != context.frames.rend(); ++it) {
+        const auto& frame = *it;
+        if (!frame.modulePin) {
+            continue;
+        }
+        const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
+        const SourceLocation location = resolveFrameSourceLocation(frame);
+        stackTrace.push_back({fn.name, location.line, location.column, frame.ip});
+    }
+    return stackTrace;
+}
+
+std::vector<ExceptionStackFrame> captureExceptionTopFrame(const ExecutionContext& context) {
+    for (auto it = context.frames.rbegin(); it != context.frames.rend(); ++it) {
+        const auto& frame = *it;
+        if (!frame.modulePin) {
+            continue;
+        }
+        const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
+        const SourceLocation location = resolveFrameSourceLocation(frame);
+        return {{fn.name, location.line, location.column, frame.ip}};
+    }
+    return {};
+}
+
+bool fullExceptionTraceEnabled() {
+    static const bool enabled = []() {
+        const char* mode = std::getenv("GS_EXCEPTION_TRACE_MODE");
+        if (!mode) {
+            return false;
+        }
+        const std::string value(mode);
+        return value == "full" || value == "FULL" || value == "1" || value == "true" || value == "TRUE";
+    }();
+    return enabled;
+}
+
+void attachThrowSiteIfException(ExecutionContext& context, const Value& value) {
+    if (!value.isRef()) {
+        return;
+    }
+    Object* object = value.asRef();
+    if (!object || !context.objectPtrToId.contains(object)) {
+        return;
+    }
+    auto* exception = dynamic_cast<ExceptionObject*>(object);
+    if (!exception || exception->hasStackTrace()) {
+        return;
+    }
+    if (fullExceptionTraceEnabled()) {
+        exception->setStackTrace(captureExceptionStackTrace(context));
+    } else {
+        exception->setStackTrace(captureExceptionTopFrame(context));
+    }
+}
+
+void ensureFullStackTraceIfException(ExecutionContext& context, const Value& value) {
+    if (!value.isRef() || !fullExceptionTraceEnabled()) {
+        return;
+    }
+    Object* object = value.asRef();
+    if (!object || !context.objectPtrToId.contains(object)) {
+        return;
+    }
+    auto* exception = dynamic_cast<ExceptionObject*>(object);
+    if (!exception) {
+        return;
+    }
+    if (exception->stackTrace().size() <= 1) {
+        exception->setStackTrace(captureExceptionStackTrace(context));
+    }
+}
+
+bool isTypeObjectAssignableFrom(const Value& actualTypeRef, const Value& expectedTypeRef) {
+    if (!actualTypeRef.isRef() || !expectedTypeRef.isRef()) {
+        return false;
+    }
+
+    Value cursor = actualTypeRef;
+    while (cursor.isRef()) {
+        if (cursor.asRef() == expectedTypeRef.asRef()) {
+            return true;
+        }
+
+        auto* typeObject = dynamic_cast<TypeObject*>(cursor.asRef());
+        if (!typeObject) {
+            return false;
+        }
+        cursor = typeObject->baseTypeObjectRef();
+    }
+
+    return false;
+}
+
+Value resolveCatchTypeObjectRef(ExecutionContext& context,
+                                const std::shared_ptr<const Module>& modulePin,
+                                const std::string& expectedTypeName,
+                                ScriptInstanceType& instanceType,
+                                DictType& dictType,
+                                ListType& listType,
+                                StringType& stringType,
+                                ExceptionType& exceptionType) {
+    if (!modulePin || expectedTypeName.empty() || expectedTypeName == "any") {
+        return Value::Nil();
+    }
+
+    if (auto cacheIt = context.moduleTypeObjectCache.find(modulePin.get());
+        cacheIt != context.moduleTypeObjectCache.end()) {
+        if (auto found = cacheIt->second.find(expectedTypeName); found != cacheIt->second.end()) {
+            return found->second;
+        }
+    }
+
+    if (isNativeExceptionTypeName(expectedTypeName)) {
+        Value baseTypeRef = Value::Nil();
+        if (expectedTypeName != kExceptionTypeName) {
+            baseTypeRef = getOrCreateModuleTypeObject(context,
+                                                      modulePin,
+                                                      std::string(kExceptionTypeName),
+                                                      resolveNativeExceptionType(kExceptionTypeName),
+                                                      Value::Nil());
+        }
+
+        return getOrCreateModuleTypeObject(context,
+                                           modulePin,
+                                           expectedTypeName,
+                                           resolveNativeExceptionType(expectedTypeName),
+                                           baseTypeRef);
+    }
+
+    for (std::size_t i = 0; i < modulePin->classes.size(); ++i) {
+        if (modulePin->classes[i].name == expectedTypeName) {
+            return ensureScriptClassTypeObject(context,
+                                               modulePin,
+                                               *modulePin,
+                                               i,
+                                               instanceType,
+                                               dictType,
+                                               listType,
+                                               stringType,
+                                               exceptionType);
+        }
+    }
+
+    return Value::Nil();
+}
+
+bool matchExceptionTypeFast(ExecutionContext& context,
+                            const std::shared_ptr<const Module>& modulePin,
+                            const Value& thrown,
+                            const std::string& expectedTypeName,
+                            ScriptInstanceType& instanceType,
+                            DictType& dictType,
+                            ListType& listType,
+                            StringType& stringType,
+                            ExceptionType& exceptionType) {
+    if (expectedTypeName == "any") {
+        return true;
+    }
+
+    if (!thrown.isRef()) {
+        return false;
+    }
+
+    Object* object = thrown.asRef();
+    if (!object || !context.objectPtrToId.contains(object)) {
+        return false;
+    }
+
+    const Value actualTypeRef = ensureObjectProto(context,
+                                                  *object,
+                                                  modulePin,
+                                                  instanceType,
+                                                  dictType,
+                                                  listType,
+                                                  stringType,
+                                                  exceptionType);
+
+    const Value expectedTypeRef = resolveCatchTypeObjectRef(context,
+                                                            modulePin,
+                                                            expectedTypeName,
+                                                            instanceType,
+                                                            dictType,
+                                                            listType,
+                                                            stringType,
+                                                            exceptionType);
+
+    return isTypeObjectAssignableFrom(actualTypeRef, expectedTypeRef);
 }
 
 std::size_t countYoungObjects(const ExecutionContext& context) {
@@ -848,7 +1101,7 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
     if (tryGetStringObject(context, value)) {
         return "string";
     }
-    if (value.isString()) {
+    if (value.isLegacyStringLiteral()) {
         return "string";
     }
 
@@ -882,12 +1135,23 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
     if (auto* instance = dynamic_cast<ScriptInstanceObject*>(object)) {
         return instance->className();
     }
+    if (auto* exception = dynamic_cast<ExceptionObject*>(object)) {
+        return exception->exceptionName();
+    }
     return object->getType().name();
 }
 
 Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
     static StringType runtimeStringType;
     return emplaceObject(context, std::make_unique<StringObject>(runtimeStringType, text));
+}
+
+Value makeRuntimeExceptionObject(ExecutionContext& context,
+                                 const std::string& exceptionName,
+                                 const std::string& message) {
+    Value exceptionRef = emplaceObject(context, makeNativeExceptionObject(exceptionName, message));
+    attachThrowSiteIfException(context, exceptionRef);
+    return exceptionRef;
 }
 
 bool valueEquals(const ExecutionContext& context, const Value& lhs, const Value& rhs) {
@@ -1071,6 +1335,8 @@ Value normalizeRuntimeValue(ExecutionContext& context,
                             const std::shared_ptr<const Module>& modulePin,
                             const Value& value,
                             bool normalizeStringLiterals) {
+    (void)normalizeStringLiterals;
+
     if (value.isFunction()) {
         return makeFunctionObject(context,
                                   functionType,
@@ -1096,12 +1362,18 @@ Value normalizeRuntimeValue(ExecutionContext& context,
         return value;
     }
 
-    if (normalizeStringLiterals && value.isString() && modulePin) {
+    // Always normalize legacy string constants into StringObject refs so runtime
+    // value flow consistently uses ref semantics for strings.
+    if (value.isLegacyStringLiteral() && modulePin) {
         const auto stringIndex = static_cast<std::size_t>(value.asStringIndex());
         if (stringIndex >= modulePin->strings.size()) {
             throw std::runtime_error("String index out of range");
         }
         return makeRuntimeString(context, modulePin->strings[stringIndex]);
+    }
+
+    if (value.isLegacyStringLiteral() && !modulePin) {
+        throw std::runtime_error("Cannot normalize string literal without module context");
     }
 
     return value;
@@ -1277,12 +1549,20 @@ Value makeNativeBaseInstance(ExecutionContext& context,
                              ListType& listType,
                              DictType& dictType,
                              const HostRegistry& hosts,
-                             const std::string& nativeTypeName) {
+                             const std::string& nativeTypeName,
+                             const std::string& scriptExceptionName = "") {
     if (nativeTypeName == "List") {
         return emplaceObject(context, std::make_unique<ListObject>(listType));
     }
     if (nativeTypeName == "Dict") {
         return emplaceObject(context, std::make_unique<DictObject>(dictType));
+    }
+    if (isNativeExceptionTypeName(nativeTypeName)) {
+        std::string exceptionName = nativeTypeName;
+        if (!scriptExceptionName.empty()) {
+            exceptionName = scriptExceptionName;
+        }
+        return emplaceObject(context, makeNativeExceptionObject(exceptionName, exceptionName));
     }
 
     if (!hosts.has(nativeTypeName)) {
@@ -1300,6 +1580,7 @@ Value makeNativeBaseInstance(ExecutionContext& context,
 Value makeScriptInstance(ExecutionContext& context,
                          ListType& listType,
                          DictType& dictType,
+                         ExceptionType& exceptionType,
                          FunctionType& functionType,
                          ClassType& classType,
                          NativeFunctionType& nativeFunctionType,
@@ -1352,10 +1633,15 @@ Value makeScriptInstance(ExecutionContext& context,
                                                            listType,
                                                            dictType,
                                                            hosts,
-                                                           resolvedNativeBaseTypeName);
+                                                           resolvedNativeBaseTypeName,
+                                                           className);
         rememberWriteBarrier(context, *instance, nativeBaseRef);
         instance->setNativeBaseRef(nativeBaseRef);
         instance->fields()["__native_base__"] = nativeBaseRef;
+        if (isNativeExceptionTypeName(resolvedNativeBaseTypeName)) {
+            instance->fields()["name"] = makeRuntimeString(context, className);
+            instance->fields()["message"] = makeRuntimeString(context, className);
+        }
     }
 
     return instanceRef;
@@ -1532,6 +1818,46 @@ Object& VirtualMachine::getObject(ExecutionContext& context, const Value& ref) {
 bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) {
     std::size_t steps = 0;
     std::vector<Value> argScratch;
+
+    const auto dispatchException = [&](const Value& thrownValue) -> bool {
+        while (!context.frames.empty()) {
+            Frame& exceptionFrame = context.frames.back();
+            if (!exceptionFrame.exceptionHandlers.empty()) {
+                const ExceptionHandler handler = exceptionFrame.exceptionHandlers.back();
+                exceptionFrame.exceptionHandlers.pop_back();
+
+                if (handler.stackTop <= exceptionFrame.stack.size()) {
+                    exceptionFrame.stackTop = handler.stackTop;
+                } else {
+                    exceptionFrame.stackTop = 0;
+                }
+
+                if (handler.catchIp >= 0) {
+                    exceptionFrame.pendingException = false;
+                    exceptionFrame.pendingExceptionValue = Value::Nil();
+                    exceptionFrame.hasActiveException = true;
+                    exceptionFrame.activeExceptionValue = thrownValue;
+                    pushRaw(exceptionFrame.stack,
+                            exceptionFrame.stackTop,
+                            thrownValue);
+                    exceptionFrame.ip = static_cast<std::size_t>(handler.catchIp);
+                    return true;
+                }
+
+                if (handler.finallyIp >= 0) {
+                    exceptionFrame.pendingException = true;
+                    exceptionFrame.pendingExceptionValue = thrownValue;
+                    exceptionFrame.ip = static_cast<std::size_t>(handler.finallyIp);
+                    return true;
+                }
+            }
+
+            context.frames.pop_back();
+        }
+
+        return false;
+    };
+
     while (steps++ < stepBudget) {
         if (context.frames.empty()) {
             return true;
@@ -1682,6 +2008,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                 const Value instanceRef = makeScriptInstance(context,
                                                              listType_,
                                                              dictType_,
+                                                             exceptionType_,
                                                              functionType_,
                                                              classType_,
                                                              nativeFunctionType_,
@@ -1773,6 +2100,14 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             return false;
         };
 
+        bool scriptThrowPending = false;
+        Value scriptThrowValue = Value::Nil();
+        const auto raiseScriptThrow = [&](const Value& thrown) {
+            scriptThrowPending = true;
+            scriptThrowValue = thrown;
+        };
+
+        try {
         switch (ins.op) {
         case OpCode::PushConst: {
             Value value = normalizeRuntimeValue(context,
@@ -1934,7 +2269,10 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                 }
                 const double divisor = toDouble(rhs);
                 if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                    throw std::runtime_error("Division by zero");
+                    raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                std::string(kDivideByZeroExceptionTypeName),
+                                                                "Division by zero"));
+                    break;
                 }
                 writeRegister(0, Value::Float(toDouble(lhs) / divisor));
                 break;
@@ -1950,7 +2288,10 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             }
             const double divisor = toDouble(rhs);
             if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                throw std::runtime_error("Division by zero");
+                raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                            std::string(kDivideByZeroExceptionTypeName),
+                                                            "Division by zero"));
+                break;
             }
             frame.stack[frame.stackTop - 1] = Value::Float(toDouble(lhs) / divisor);
             break;
@@ -1964,7 +2305,10 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                 }
                 const double divisor = toDouble(rhs);
                 if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                    throw std::runtime_error("Division by zero");
+                    raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                std::string(kDivideByZeroExceptionTypeName),
+                                                                "Division by zero"));
+                    break;
                 }
                 writeRegister(0, Value::Int(static_cast<std::int64_t>(std::floor(toDouble(lhs) / divisor))));
                 break;
@@ -1980,7 +2324,10 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             }
             const double divisor = toDouble(rhs);
             if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                throw std::runtime_error("Division by zero");
+                raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                            std::string(kDivideByZeroExceptionTypeName),
+                                                            "Division by zero"));
+                break;
             }
             frame.stack[frame.stackTop - 1] = Value::Int(static_cast<std::int64_t>(std::floor(toDouble(lhs) / divisor)));
             break;
@@ -1991,13 +2338,19 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                 const Value rhs = resolveSlotValue(ins.bSlotType, ins.b);
                 if (lhs.isInt() && rhs.isInt()) {
                     if (rhs.asInt() == 0) {
-                        throw std::runtime_error("Modulo by zero");
+                        raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                    std::string(kDivideByZeroExceptionTypeName),
+                                                                    "Modulo by zero"));
+                        break;
                     }
                     writeRegister(0, Value::Int(lhs.asInt() % rhs.asInt()));
                 } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
                     const double divisor = toDouble(rhs);
                     if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                        throw std::runtime_error("Modulo by zero");
+                        raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                    std::string(kDivideByZeroExceptionTypeName),
+                                                                    "Modulo by zero"));
+                        break;
                     }
                     writeRegister(0, Value::Float(std::fmod(toDouble(lhs), divisor)));
                 } else {
@@ -2013,13 +2366,19 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             --frame.stackTop;
             if (lhs.isInt() && rhs.isInt()) {
                 if (rhs.asInt() == 0) {
-                    throw std::runtime_error("Modulo by zero");
+                    raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                std::string(kDivideByZeroExceptionTypeName),
+                                                                "Modulo by zero"));
+                    break;
                 }
                 frame.stack[frame.stackTop - 1] = Value::Int(lhs.asInt() % rhs.asInt());
             } else if (isNumericValue(lhs) && isNumericValue(rhs)) {
                 const double divisor = toDouble(rhs);
                 if (std::abs(divisor) <= std::numeric_limits<double>::epsilon()) {
-                    throw std::runtime_error("Modulo by zero");
+                    raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                std::string(kDivideByZeroExceptionTypeName),
+                                                                "Modulo by zero"));
+                    break;
                 }
                 frame.stack[frame.stackTop - 1] = Value::Float(std::fmod(toDouble(lhs), divisor));
             } else {
@@ -2702,6 +3061,65 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             }
             break;
         }
+        case OpCode::MatchExceptionType: {
+            const Value thrown = resolveSlotValue(SlotType::Local, ins.a);
+            const std::string& expectedTypeName = frameModule->strings.at(static_cast<std::size_t>(ins.b));
+            const bool matched = matchExceptionTypeFast(context,
+                                                        frameModule,
+                                                        thrown,
+                                                        expectedTypeName,
+                                                        instanceType_,
+                                                        dictType_,
+                                                        listType_,
+                                                        stringType_,
+                                                        exceptionType_);
+            writeRegister(0, Value::Int(matched ? 1 : 0));
+            break;
+        }
+        case OpCode::TryBegin: {
+            ExceptionHandler handler;
+            handler.catchIp = ins.a;
+            handler.finallyIp = ins.b;
+            handler.stackTop = frame.stackTop;
+            frame.exceptionHandlers.push_back(handler);
+            break;
+        }
+        case OpCode::TryEnd:
+            if (!frame.exceptionHandlers.empty()) {
+                frame.exceptionHandlers.pop_back();
+            }
+            frame.hasActiveException = false;
+            frame.activeExceptionValue = Value::Nil();
+            break;
+        case OpCode::Throw: {
+            if (ins.a != 0) {
+                if (!frame.hasActiveException) {
+                    throw std::runtime_error("rethrow used without active exception");
+                }
+                attachThrowSiteIfException(context, frame.activeExceptionValue);
+                raiseScriptThrow(frame.activeExceptionValue);
+                break;
+            }
+
+            if (frame.stackTop == 0) {
+                throw std::runtime_error("throw requires a value");
+            }
+            const Value thrown = popRaw(frame.stack, frame.stackTop);
+            attachThrowSiteIfException(context, thrown);
+            raiseScriptThrow(thrown);
+            break;
+        }
+        case OpCode::EndFinally:
+            if (frame.pendingException) {
+                const Value pending = frame.pendingExceptionValue;
+                frame.pendingException = false;
+                frame.pendingExceptionValue = Value::Nil();
+                raiseScriptThrow(pending);
+                break;
+            }
+            frame.hasActiveException = false;
+            frame.activeExceptionValue = Value::Nil();
+            break;
         case OpCode::CallHost: {
             collectArgs(frame.stack, frame.stackTop, static_cast<std::size_t>(ins.b), argScratch);
             const auto& name = frameModule->strings.at(ins.a);
@@ -2724,6 +3142,7 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             const Value instanceRef = makeScriptInstance(context,
                                                          listType_,
                                                          dictType_,
+                                                         exceptionType_,
                                                          functionType_,
                                                          classType_,
                                                          nativeFunctionType_,
@@ -2762,7 +3181,8 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                          instanceType_,
                                                          dictType_,
                                                          listType_,
-                                                         stringType_);
+                                                         stringType_,
+                                                         exceptionType_);
                 pushRaw(frame.stack, frame.stackTop, protoRef);
                 break;
             }
@@ -2779,7 +3199,10 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                         } catch (const std::runtime_error&) {
                         }
                     }
-                    throw std::runtime_error("Unknown class attribute: " + attrName);
+                    raiseScriptThrow(makeRuntimeExceptionObject(context,
+                                                                std::string(kPropertyNotFoundExceptionTypeName),
+                                                                "Unknown class attribute: " + attrName));
+                    break;
                 }
                 const auto valueModule = instance->modulePin() ? instance->modulePin() : frameModule;
                 it->second = normalizeRuntimeValue(context,
@@ -2792,6 +3215,56 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
                                                    it->second,
                                                    false);
                 pushRaw(frame.stack, frame.stackTop, it->second);
+            } else if (auto* exceptionObject = dynamic_cast<ExceptionObject*>(&object)) {
+                if (attrName == "name") {
+                    pushRaw(frame.stack,
+                            frame.stackTop,
+                            makeRuntimeString(context, exceptionObject->exceptionName()));
+                    break;
+                }
+                if (attrName == "message") {
+                    pushRaw(frame.stack,
+                            frame.stackTop,
+                            makeRuntimeString(context, exceptionObject->message()));
+                    break;
+                }
+                if (attrName == "throw_function") {
+                    std::string functionName;
+                    if (exceptionObject->hasStackTrace()) {
+                        functionName = exceptionObject->stackTrace().front().functionName;
+                    }
+                    pushRaw(frame.stack,
+                            frame.stackTop,
+                            makeRuntimeString(context, functionName));
+                    break;
+                }
+                if (attrName == "throw_line") {
+                    std::int64_t line = 0;
+                    if (exceptionObject->hasStackTrace()) {
+                        line = static_cast<std::int64_t>(exceptionObject->stackTrace().front().line);
+                    }
+                    pushRaw(frame.stack, frame.stackTop, Value::Int(line));
+                    break;
+                }
+                if (attrName == "throw_column") {
+                    std::int64_t column = 0;
+                    if (exceptionObject->hasStackTrace()) {
+                        column = static_cast<std::int64_t>(exceptionObject->stackTrace().front().column);
+                    }
+                    pushRaw(frame.stack, frame.stackTop, Value::Int(column));
+                    break;
+                }
+                if (attrName == "throw_stack") {
+                    pushRaw(frame.stack,
+                            frame.stackTop,
+                            makeRuntimeString(context, exceptionObject->formatStackTrace()));
+                    break;
+                }
+
+                VmHostContext hostContext(*this, context);
+                BoundClassType::setThreadLocalContext(&hostContext);
+                pushRaw(frame.stack, frame.stackTop, object.getType().getMember(object, attrName));
+                BoundClassType::setThreadLocalContext(nullptr);
             } else if (auto* moduleObj = dynamic_cast<ModuleObject*>(&object)) {
                 auto exportIt = moduleObj->exports().find(attrName);
                 if (exportIt != moduleObj->exports().end()) {
@@ -2904,6 +3377,19 @@ load_attr_done:
                 rememberWriteBarrier(context, *instance, normalized);
                 instance->fields()[attrName] = normalized;
                 pushRaw(frame.stack, frame.stackTop, normalized);
+            } else if (auto* exceptionObject = dynamic_cast<ExceptionObject*>(&object)) {
+                if (attrName == "name") {
+                    exceptionObject->setExceptionName(__str__Value(context, normalized));
+                    pushRaw(frame.stack, frame.stackTop, normalized);
+                    break;
+                }
+                if (attrName == "message") {
+                    exceptionObject->setMessage(__str__Value(context, normalized));
+                    pushRaw(frame.stack, frame.stackTop, normalized);
+                    break;
+                }
+
+                throw std::runtime_error("Unknown or read-only Exception member: " + attrName);
             } else {
                 rememberWriteBarrier(context, object, normalized);
                 // Set thread-local context for BoundClassType
@@ -3357,6 +3843,28 @@ call_method_done:
         }
         }
 
+        } catch (const std::exception& ex) {
+            const std::string message = ex.what();
+            const std::string exceptionName = classifyRuntimeExceptionTypeName(message);
+            const Value mappedException = makeRuntimeExceptionObject(context,
+                                                                     exceptionName,
+                                                                     message);
+            if (!dispatchException(mappedException)) {
+                throw;
+            }
+            continue;
+        }
+
+        if (scriptThrowPending) {
+            if (!dispatchException(scriptThrowValue)) {
+                context.hasUnhandledScriptException = true;
+                context.unhandledScriptExceptionValue = scriptThrowValue;
+                context.frames.clear();
+                return true;
+            }
+            continue;
+        }
+
         runGcSlice(context, context.gc.sliceBudgetObjects);
     }
 
@@ -3375,8 +3883,43 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
         while (!execute(ctx, 1000)) {
         }
 
+        if (ctx.hasUnhandledScriptException) {
+            throw ScriptThrownException(ctx.unhandledScriptExceptionValue);
+        }
+
         runDeleteHooks(ctx);
         return ctx.returnValue;
+    } catch (const ScriptThrownException& e) {
+        ensureFullStackTraceIfException(ctx, e.value());
+
+        std::vector<std::string> callStack;
+        for (std::size_t frameIndex = 0; frameIndex < ctx.frames.size(); ++frameIndex) {
+            const auto& frame = ctx.frames[frameIndex];
+            if (frame.modulePin) {
+                const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
+                const SourceLocation location = resolveFrameSourceLocation(frame);
+                callStack.push_back(fn.name + " (line " + std::to_string(location.line) + ", column " + std::to_string(location.column) + ", ip=" + std::to_string(frame.ip) + ")");
+            }
+        }
+
+        std::string currentFn = ctx.frames.empty() ? functionName :
+            ctx.frames.back().modulePin->functions.at(ctx.frames.back().functionIndex).name;
+
+        std::size_t currentLine = 0;
+        if (!ctx.frames.empty()) {
+            const auto& currentFrame = ctx.frames.back();
+            currentLine = resolveFrameSourceLocation(currentFrame).line;
+        }
+
+        ErrorLogger::instance().logVmError(
+            __str__Value(ctx, e.value()),
+            currentFn,
+            currentLine,
+            callStack,
+            "runFunction('" + functionName + "')"
+        );
+
+        throw;
     } catch (const std::exception& e) {
         // Build call stack for logging
         std::vector<std::string> callStack;
@@ -3384,8 +3927,8 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
             const auto& frame = ctx.frames[frameIndex];
             if (frame.modulePin) {
                 const auto& fn = frame.modulePin->functions.at(frame.functionIndex);
-                const std::size_t line = resolveFrameSourceLine(frame);
-                callStack.push_back(fn.name + " (line " + std::to_string(line) + ", ip=" + std::to_string(frame.ip) + ")");
+                const SourceLocation location = resolveFrameSourceLocation(frame);
+                callStack.push_back(fn.name + " (line " + std::to_string(location.line) + ", column " + std::to_string(location.column) + ", ip=" + std::to_string(frame.ip) + ")");
             }
         }
         
@@ -3396,7 +3939,7 @@ Value VirtualMachine::runFunction(const std::string& functionName, const std::ve
         std::size_t currentLine = 0;
         if (!ctx.frames.empty()) {
             const auto& currentFrame = ctx.frames.back();
-            currentLine = resolveFrameSourceLine(currentFrame);
+            currentLine = resolveFrameSourceLocation(currentFrame).line;
         }
         
         // Log error with VM state

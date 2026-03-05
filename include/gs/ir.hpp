@@ -148,7 +148,8 @@ inline FunctionBytecode lowerFunctionIR(const FunctionIR& ir) {
                             instruction.a,
                             instruction.bSlotType,
                             instruction.b,
-                            instruction.line});  // 保留行号信息
+                            instruction.line,
+                            instruction.column});
     }
     return out;
 }

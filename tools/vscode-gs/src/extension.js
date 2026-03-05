@@ -1,5 +1,111 @@
 const vscode = require('vscode');
 
+function formatGsText(text, options) {
+  const lines = text.split(/\r?\n/);
+  const tabSize = Number.isInteger(options?.tabSize) ? options.tabSize : 4;
+  const indentUnit = options?.insertSpaces === false ? '\t' : ' '.repeat(Math.max(1, tabSize));
+
+  let indentLevel = 0;
+  let inBlockComment = false;
+  const out = [];
+
+  const stripForBraceScan = (line, state) => {
+    let s = '';
+    let i = 0;
+    let inString = false;
+    let escaped = false;
+    let inBlock = state;
+
+    while (i < line.length) {
+      const ch = line[i];
+      const next = i + 1 < line.length ? line[i + 1] : '';
+
+      if (inBlock) {
+        if (ch === '*' && next === '/') {
+          inBlock = false;
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (!inString) {
+        if (ch === '#') {
+          break;
+        }
+        if (ch === '/' && next === '/') {
+          break;
+        }
+        if (ch === '/' && next === '*') {
+          inBlock = true;
+          i += 2;
+          continue;
+        }
+        if (ch === '"') {
+          inString = true;
+          escaped = false;
+          i += 1;
+          continue;
+        }
+        s += ch;
+        i += 1;
+        continue;
+      }
+
+      if (escaped) {
+        escaped = false;
+        i += 1;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        i += 1;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        i += 1;
+        continue;
+      }
+      i += 1;
+    }
+
+    return { text: s, inBlockComment: inBlock };
+  };
+
+  const countChar = (s, ch) => {
+    let count = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === ch) {
+        count += 1;
+      }
+    }
+    return count;
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (trimmed.length === 0) {
+      out.push('');
+      continue;
+    }
+
+    const leadingClosersMatch = trimmed.match(/^\}+/);
+    const leadingClosers = leadingClosersMatch ? leadingClosersMatch[0].length : 0;
+    const currentIndent = Math.max(0, indentLevel - leadingClosers);
+    out.push(indentUnit.repeat(currentIndent) + trimmed);
+
+    const scan = stripForBraceScan(trimmed, inBlockComment);
+    inBlockComment = scan.inBlockComment;
+    const opens = countChar(scan.text, '{');
+    const closes = countChar(scan.text, '}');
+    indentLevel = Math.max(0, indentLevel + opens - closes);
+  }
+
+  return out.join('\n');
+}
+
 function activate(context) {
   const disposable = vscode.commands.registerCommand('gs.addLineComment', async () => {
     const editor = vscode.window.activeTextEditor;
@@ -22,7 +128,24 @@ function activate(context) {
     });
   });
 
-  context.subscriptions.push(disposable);
+  const formatter = vscode.languages.registerDocumentFormattingEditProvider('gs', {
+    provideDocumentFormattingEdits(document, options) {
+      const original = document.getText();
+      const formatted = formatGsText(original, options);
+      if (formatted === original) {
+        return [];
+      }
+
+      const fullRange = new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(original.length)
+      );
+
+      return [vscode.TextEdit.replace(fullRange, formatted)];
+    },
+  });
+
+  context.subscriptions.push(disposable, formatter);
 }
 
 function deactivate() {}

@@ -174,11 +174,11 @@ class CountingDict extends Dict {
     }
 
     fn get(self, key) {
-        let value = super.get(self, key);
-        if (value == null) {
+        try {
+            return super.get(self, key);
+        } catch (DictKeyNotFoundException as err) {
             return -1;
         }
-        return value;
     }
 
     fn size(self) {
@@ -565,6 +565,26 @@ fn benchmark_native_dict_inheritance() {
     return sum + d.writeCount;
 }
 
+fn benchmark_exception_engine() {
+    let iterations = 2000;
+    let checksum = 0;
+    let i = 0;
+
+    while (i < iterations) {
+        try {
+            let z = i - i;
+            let x = 100 / z;
+            checksum = checksum + x;
+        } catch (DivideByZeroException as err) {
+            checksum = checksum + err.throw_line + err.throw_column;
+        }
+        i = i + 1;
+    }
+
+    assert(checksum > 0, "exception benchmark checksum should be positive, actual {}", checksum);
+    return checksum;
+}
+
 # ============================================================================
 # Run Performance Benchmark Suite
 # ============================================================================
@@ -585,6 +605,7 @@ fn run_performance_benchmark() {
     suite.add("Lambda Closures (complex)", benchmark_lambda_closures);
     suite.add("Printf Operations", benchmark_printf);
     suite.add("Native Dict Inheritance", benchmark_native_dict_inheritance);
+    suite.add("Exception Engine", benchmark_exception_engine);
     
     let results = suite.run();
     
@@ -625,6 +646,7 @@ fn run_bench(verbose) {
     let checksum6 = benchmark_operators();
     let checksum7 = benchmark_string_object_operations();
     let checksum8 = benchmark_native_dict_inheritance();
+    let checksum9 = benchmark_exception_engine();
     let reclaimed = system.gc();
     assert(reclaimed >= 0, "system.gc should be non-negative, actual {}", reclaimed);
 
@@ -645,12 +667,13 @@ fn run_bench(verbose) {
         print("[bench] checksum6 (operators)", checksum6);
         print("[bench] checksum7 (string-object)", checksum7);
         print("[bench] checksum8 (native-dict-inherit)", checksum8);
+        print("[bench] checksum9 (exception-engine)", checksum9);
         print("[bench] gc", reclaimed);
         print("[bench] suite done");
     }
 
     assert(passed == 7, "passed groups expected 7, actual {}", passed);
-    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + checksum8 + reclaimed;
+    return checksum1 + checksum2 + checksum3 + checksum4 + checksum5 + checksum6 + checksum7 + checksum8 + checksum9 + reclaimed;
 }
 
 fn ue_entry() {

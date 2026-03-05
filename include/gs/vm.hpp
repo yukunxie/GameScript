@@ -50,6 +50,12 @@ struct GcState {
     std::size_t sliceBudgetObjects{16};
 };
 
+struct ExceptionHandler {
+    std::int32_t catchIp{-1};
+    std::int32_t finallyIp{-1};
+    std::size_t stackTop{0};
+};
+
 struct Frame {
     std::size_t functionIndex{0};
     std::size_t ip{0};
@@ -60,6 +66,11 @@ struct Frame {
     std::vector<Value> captures;
     std::vector<Value> stack;
     std::size_t stackTop{0};
+    std::vector<ExceptionHandler> exceptionHandlers;
+    bool pendingException{false};
+    Value pendingExceptionValue{Value::Nil()};
+    bool hasActiveException{false};
+    Value activeExceptionValue{Value::Nil()};
     std::array<Value, 8> registers{Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil(), Value::Nil()};
     Value registerValue{Value::Nil()};
 };
@@ -67,6 +78,8 @@ struct Frame {
 struct ExecutionContext {
     std::vector<Frame> frames;
     Value returnValue{Value::Nil()};
+    bool hasUnhandledScriptException{false};
+    Value unhandledScriptExceptionValue{Value::Nil()};
     bool deleteHooksRan{false};
     std::shared_ptr<const Module> modulePin;
     std::vector<std::string> stringPool;
@@ -117,6 +130,7 @@ private:
     ClassType classType_;
     ModuleType moduleType_;
     ScriptInstanceType instanceType_;
+    ExceptionType exceptionType_;
     UpvalueCellType upvalueCellType_;
 };
 

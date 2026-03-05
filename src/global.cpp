@@ -702,6 +702,59 @@ Value impl_system_gc(HostContext& context, const std::vector<Value>& args) {
     return context.collectGarbage(generation);
 }
 
+Value impl_match_exception_type(HostContext& context, const std::vector<Value>& args) {
+    if (args.size() != 2) {
+        throw std::runtime_error("__match_exception_type(value, typeName) requires exactly 2 arguments");
+    }
+
+    const Value& thrown = args[0];
+    const std::string expectedType = context.__str__(args[1]);
+    if (expectedType.empty()) {
+        return Value::Int(0);
+    }
+
+    if (expectedType == "any") {
+        return Value::Int(1);
+    }
+
+    if (!thrown.isRef()) {
+        return Value::Int(0);
+    }
+
+    Object& object = context.getObject(thrown);
+    if (auto* exceptionObject = dynamic_cast<ExceptionObject*>(&object)) {
+        if (expectedType == kExceptionTypeName || exceptionObject->exceptionName() == expectedType) {
+            return Value::Int(1);
+        }
+        return Value::Int(0);
+    }
+
+    auto* instance = dynamic_cast<ScriptInstanceObject*>(&object);
+    if (!instance) {
+        return Value::Int(0);
+    }
+
+    if (instance->className() == expectedType) {
+        return Value::Int(1);
+    }
+
+    if (!instance->hasNativeBase()) {
+        return Value::Int(0);
+    }
+
+    Object& nativeBase = context.getObject(instance->nativeBaseRef());
+    auto* baseException = dynamic_cast<ExceptionObject*>(&nativeBase);
+    if (!baseException) {
+        return Value::Int(0);
+    }
+
+    if (expectedType == kExceptionTypeName || baseException->exceptionName() == expectedType) {
+        return Value::Int(1);
+    }
+
+    return Value::Int(0);
+}
+
 // ============================================================================
 // Binding Registration
 // ============================================================================
@@ -760,6 +813,23 @@ void bindGlobalModule(HostRegistry& host) {
 
     host.bind("assert", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
         return impl_assert(ctx, args);
+    });
+
+    host.bind("__match_exception_type", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
+        return impl_match_exception_type(ctx, args);
+    });
+
+    host.bind("Exception", [](HostContext& ctx, const std::vector<Value>& args) -> Value {
+        if (args.size() > 1) {
+            throw std::runtime_error("Exception constructor accepts at most one argument");
+        }
+
+        std::string message = "Exception";
+        if (!args.empty()) {
+            message = ctx.__str__(args[0]);
+        }
+
+        return ctx.createObject(makeNativeExceptionObject(kExceptionTypeName, message));
     });
 }
 

@@ -86,6 +86,11 @@ const char* opcodeName(OpCode op) {
     case OpCode::Jump: return "Jump";
     case OpCode::JumpIfFalse: return "JumpIfFalse";
     case OpCode::JumpIfFalseReg: return "JumpIfFalseReg";
+    case OpCode::TryBegin: return "TryBegin";
+    case OpCode::TryEnd: return "TryEnd";
+    case OpCode::Throw: return "Throw";
+    case OpCode::EndFinally: return "EndFinally";
+    case OpCode::MatchExceptionType: return "MatchExceptionType";
     case OpCode::CallHost: return "CallHost";
     case OpCode::CallFunc: return "CallFunc";
     case OpCode::NewInstance: return "NewInstance";
@@ -223,6 +228,10 @@ std::string bytecodeOperandHint(const Module& module, const Instruction& ins, co
     case OpCode::JumpIfFalse:
     case OpCode::JumpIfFalseReg:
         return std::string("target=") + std::to_string(ins.a);
+    case OpCode::TryBegin:
+        return std::string("catch=") + std::to_string(ins.a) + " finally=" + std::to_string(ins.b);
+    case OpCode::MatchExceptionType:
+        return std::string("thrownLocal=") + std::to_string(ins.a) + " type='" + module.strings.at(static_cast<std::size_t>(ins.b)) + "'";
     case OpCode::LoadLocal:
     case OpCode::PushLocal:
     case OpCode::StoreLocal:
@@ -942,9 +951,19 @@ void collectCapturedNamesInStatements(const std::vector<Stmt>& statements,
             }
             collectCapturedNamesInStatements(stmt.elseBody, outerLocals, lambdaLocals, outCaptureNames, dedup);
             break;
+        case StmtType::Try:
+            collectCapturedNamesInStatements(stmt.body, outerLocals, lambdaLocals, outCaptureNames, dedup);
+            for (const auto& catchBody : stmt.catchBodies) {
+                collectCapturedNamesInStatements(catchBody, outerLocals, lambdaLocals, outCaptureNames, dedup);
+            }
+            collectCapturedNamesInStatements(stmt.finallyBody, outerLocals, lambdaLocals, outCaptureNames, dedup);
+            break;
         case StmtType::While:
             collectCapturedNamesInExpr(stmt.condition, outerLocals, lambdaLocals, outCaptureNames, dedup);
             collectCapturedNamesInStatements(stmt.body, outerLocals, lambdaLocals, outCaptureNames, dedup);
+            break;
+        case StmtType::Throw:
+            collectCapturedNamesInExpr(stmt.expr, outerLocals, lambdaLocals, outCaptureNames, dedup);
             break;
         case StmtType::Break:
         case StmtType::Continue:
@@ -1084,11 +1103,24 @@ void validateLocalUsageInStatements(const std::vector<Stmt>& statements,
             }
             validateLocalUsageInStatements(stmt.elseBody, localNames, declaredNames, scopeName);
             break;
+        case StmtType::Try: {
+            validateLocalUsageInStatements(stmt.body, localNames, declaredNames, scopeName);
+            for (std::size_t i = 0; i < stmt.catchBodies.size(); ++i) {
+                auto catchDeclared = declaredNames;
+                if (i < stmt.catchErrorNames.size() && !stmt.catchErrorNames[i].empty()) {
+                    catchDeclared.insert(stmt.catchErrorNames[i]);
+                }
+                validateLocalUsageInStatements(stmt.catchBodies[i], localNames, catchDeclared, scopeName);
+            }
+            validateLocalUsageInStatements(stmt.finallyBody, localNames, declaredNames, scopeName);
+            break;
+        }
         case StmtType::While:
             validateLocalUsageInExpr(stmt.condition, localNames, declaredNames, scopeName);
             validateLocalUsageInStatements(stmt.body, localNames, declaredNames, scopeName);
             break;
         case StmtType::Expr:
+        case StmtType::Throw:
         case StmtType::Return:
             validateLocalUsageInExpr(stmt.expr, localNames, declaredNames, scopeName);
             break;
@@ -1220,6 +1252,8 @@ void collectLocalDeclarations(const std::vector<Stmt>& statements,
             }
             localNames.insert(stmt.name);
             break;
+        case StmtType::Try:
+            break;
         default:
             break;
         }
@@ -1234,6 +1268,14 @@ void collectLocalDeclarations(const std::vector<Stmt>& statements,
             if (!branchBody.empty()) {
                 collectLocalDeclarations(branchBody, localNames, scopeName);
             }
+        }
+        for (const auto& catchBody : stmt.catchBodies) {
+            if (!catchBody.empty()) {
+                collectLocalDeclarations(catchBody, localNames, scopeName);
+            }
+        }
+        if (!stmt.finallyBody.empty()) {
+            collectLocalDeclarations(stmt.finallyBody, localNames, scopeName);
         }
     }
 }
@@ -3032,6 +3074,112 @@ void compileStatements(const std::vector<Stmt>& statements,
             }
             break;
         }
+        case StmtType::Try: {
+            const std::size_t tryBegin = out.code.size();
+            emit(out.code, OpCode::TryBegin, -1, -1);
+
+            compileStatements(stmt.body,
+                              module,
+                              locals,
+                              funcIndex,
+                              classIndex,
+                              currentFunctionName,
+                              isModuleInit,
+                              out,
+                              loopContext,
+                              constTempSlots,
+                              captureIndexByName);
+
+            emit(out.code, OpCode::TryEnd);
+            const std::size_t jumpAfterTry = emitJump(out.code, OpCode::Jump);
+
+            std::size_t catchStart = static_cast<std::size_t>(-1);
+            std::size_t finallyStart = static_cast<std::size_t>(-1);
+            std::vector<std::size_t> catchExitJumps;
+
+            if (!stmt.catchBodies.empty()) {
+                catchStart = out.code.size();
+
+                const std::size_t thrownSlot = ensureLocal(locals,
+                                                           out.localCount,
+                                                           "__gs_catch_thrown_" + std::to_string(catchStart),
+                                                           &out);
+                emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(thrownSlot), 0);
+
+                for (std::size_t i = 0; i < stmt.catchBodies.size(); ++i) {
+                    const std::string catchTypeName = i < stmt.catchTypeNames.size() ? stmt.catchTypeNames[i] : std::string("any");
+                    const std::string catchErrorName = i < stmt.catchErrorNames.size() ? stmt.catchErrorNames[i] : std::string();
+
+                    emit(out.code,
+                        OpCode::MatchExceptionType,
+                        static_cast<std::int32_t>(thrownSlot),
+                        addString(module, catchTypeName));
+                    const std::size_t mismatchJump = emitJumpIfFalseReg(out.code);
+
+                    if (!catchErrorName.empty()) {
+                        emitLocalValueToStack(out.code, thrownSlot);
+                        if (isModuleInit) {
+                            emit(out.code, OpCode::StoreName, addString(module, catchErrorName), 0);
+                        } else {
+                            const auto catchSlot = ensureLocal(locals, out.localCount, catchErrorName, &out);
+                            emit(out.code, OpCode::StoreLocal, static_cast<std::int32_t>(catchSlot), 0);
+                        }
+                    }
+
+                    compileStatements(stmt.catchBodies[i],
+                                      module,
+                                      locals,
+                                      funcIndex,
+                                      classIndex,
+                                      currentFunctionName,
+                                      isModuleInit,
+                                      out,
+                                      loopContext,
+                                      constTempSlots,
+                                      captureIndexByName);
+
+                    catchExitJumps.push_back(emitJump(out.code, OpCode::Jump));
+                    patchJump(out.code, mismatchJump, out.code.size());
+                }
+
+                emit(out.code, OpCode::Throw, 1, 0);
+            }
+
+            if (!stmt.finallyBody.empty()) {
+                finallyStart = out.code.size();
+                compileStatements(stmt.finallyBody,
+                                  module,
+                                  locals,
+                                  funcIndex,
+                                  classIndex,
+                                  currentFunctionName,
+                                  isModuleInit,
+                                  out,
+                                  loopContext,
+                                  constTempSlots,
+                                  captureIndexByName);
+                emit(out.code, OpCode::EndFinally);
+            }
+
+            const std::size_t afterTryStmt = out.code.size();
+
+            out.code[tryBegin].a = static_cast<std::int32_t>(catchStart == static_cast<std::size_t>(-1) ? -1 : catchStart);
+            out.code[tryBegin].b = static_cast<std::int32_t>(finallyStart == static_cast<std::size_t>(-1) ? -1 : finallyStart);
+
+            if (finallyStart != static_cast<std::size_t>(-1)) {
+                patchJump(out.code, jumpAfterTry, finallyStart);
+                for (const auto jumpIndex : catchExitJumps) {
+                    patchJump(out.code, jumpIndex, finallyStart);
+                }
+            } else {
+                patchJump(out.code, jumpAfterTry, afterTryStmt);
+                for (const auto jumpIndex : catchExitJumps) {
+                    patchJump(out.code, jumpIndex, afterTryStmt);
+                }
+            }
+
+            break;
+        }
         case StmtType::Break:
             if (!loopContext) {
                 throw std::runtime_error(formatCompilerError("'break' used outside of loop",
@@ -3198,6 +3346,27 @@ void compileStatements(const std::vector<Stmt>& statements,
             annotateExprStmtLines();
             break;
         }
+        case StmtType::Throw:
+            if (stmt.rethrow) {
+                emit(out.code, OpCode::Throw, 1, 0);
+                break;
+            }
+
+            if (tryLowerBinaryExprToRegWithTempLocals(stmt.expr,
+                                                      module,
+                                                      locals,
+                                                      funcIndex,
+                                                      classIndex,
+                                                      currentFunctionName,
+                                                      out,
+                                                      constTempSlots,
+                                                      captureIndexByName)) {
+                emit(out.code, OpCode::PushReg);
+            } else {
+                compileExpr(stmt.expr, module, locals, funcIndex, classIndex, currentFunctionName, out.code, captureIndexByName);
+            }
+            emit(out.code, OpCode::Throw, 0, 0);
+            break;
         case StmtType::Return:
             if (tryLowerBinaryExprToRegWithTempLocals(stmt.expr,
                                                       module,
@@ -3663,7 +3832,8 @@ std::string serializeModuleText(const Module& module) {
         for (const auto& ins : fn.code) {
             out << static_cast<int>(ins.op) << ' '
                 << static_cast<int>(ins.aSlotType) << ' ' << ins.a << ' '
-                << static_cast<int>(ins.bSlotType) << ' ' << ins.b << "\n";
+                << static_cast<int>(ins.bSlotType) << ' ' << ins.b << ' '
+                << ins.line << ' ' << ins.column << "\n";
         }
     }
 
@@ -3745,13 +3915,22 @@ Module deserializeModuleText(const std::string& text) {
             int bSlot = 0;
             std::int32_t a = 0;
             std::int32_t b = 0;
+            std::size_t line = 0;
+            std::size_t column = 0;
             Instruction ins;
             in >> op >> aSlot >> a >> bSlot >> b;
+            if (!(in >> line >> column)) {
+                in.clear();
+                line = 0;
+                column = 0;
+            }
             ins.op = static_cast<OpCode>(op);
             ins.aSlotType = static_cast<SlotType>(aSlot);
             ins.a = a;
             ins.bSlotType = static_cast<SlotType>(bSlot);
             ins.b = b;
+            ins.line = line;
+            ins.column = column;
             fn.code.push_back(ins);
         }
 
@@ -3851,7 +4030,24 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
         for (const auto& ins : fn.code) {
             out << "        f.code.push_back(gs::Instruction{gs::OpCode::";
             out << opcodeName(ins.op);
-            out << ", " << ins.a << ", " << ins.b << "});\n";
+            out << ", gs::SlotType::";
+            switch (ins.aSlotType) {
+            case SlotType::None: out << "None"; break;
+            case SlotType::Local: out << "Local"; break;
+            case SlotType::Constant: out << "Constant"; break;
+            case SlotType::Register: out << "Register"; break;
+            case SlotType::UpValue: out << "UpValue"; break;
+            }
+            out << ", " << ins.a;
+            out << ", gs::SlotType::";
+            switch (ins.bSlotType) {
+            case SlotType::None: out << "None"; break;
+            case SlotType::Local: out << "Local"; break;
+            case SlotType::Constant: out << "Constant"; break;
+            case SlotType::Register: out << "Register"; break;
+            case SlotType::UpValue: out << "UpValue"; break;
+            }
+            out << ", " << ins.b << ", " << ins.line << ", " << ins.column << "});\n";
         }
         out << "        m.functions.push_back(std::move(f));\n";
         out << "    }\n";

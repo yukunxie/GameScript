@@ -69,7 +69,11 @@
       "patterns": [
         {
           "name": "keyword.control.gs",
-          "match": "\\b(fn|class|extends|let|for|in|if|elif|else|while|break|continue|return|spawn|await|sleep|yield|import|from|as)\\b"
+          "match": "\\b(fn|class|extends|let|for|in|if|elif|else|try|catch|throw|finally|while|break|continue|return|spawn|await|sleep|yield|import|from|as|vs|global|builtin|any)\\b"
+        },
+        {
+          "name": "variable.language.self.gs",
+          "match": "\\bself\\b"
         },
         {
           "name": "keyword.operator.logical.gs",

@@ -359,6 +359,64 @@ Stmt Parser::parseStatement() {
         return parseIfStatement();
     }
 
+    if (match(TokenType::KeywordTry)) {
+        const Token& tryToken = previous();
+        Stmt stmt;
+        stmt.type = StmtType::Try;
+        stmt.line = tryToken.line;
+        stmt.column = tryToken.column;
+
+        consume(TokenType::LBrace, "Expected '{' after try");
+        stmt.body = parseBlock();
+
+        bool hasCatch = false;
+        bool hasFinally = false;
+
+        while (match(TokenType::KeywordCatch)) {
+            hasCatch = true;
+            (void)previous();
+
+            consume(TokenType::LParen, "Expected '(' after catch");
+            if (!check(TokenType::Identifier) && !check(TokenType::KeywordAny)) {
+                throw std::runtime_error(formatParseError("Expected exception type in catch", peek()));
+            }
+
+            const Token firstToken = peek();
+            if (check(TokenType::KeywordAny)) {
+                consume(TokenType::KeywordAny, "Expected 'any' in catch");
+            } else {
+                consume(TokenType::Identifier, "Expected exception type in catch");
+            }
+            std::string catchTypeName;
+            std::string catchErrorName;
+            if (match(TokenType::KeywordAs)) {
+                catchTypeName = firstToken.text;
+                catchErrorName = consume(TokenType::Identifier, "Expected catch variable name after 'as'").text;
+            } else {
+                catchTypeName = "any";
+                catchErrorName = firstToken.text;
+            }
+
+            consume(TokenType::RParen, "Expected ')' after catch clause");
+            consume(TokenType::LBrace, "Expected '{' after catch clause");
+            stmt.catchTypeNames.push_back(std::move(catchTypeName));
+            stmt.catchErrorNames.push_back(std::move(catchErrorName));
+            stmt.catchBodies.push_back(parseBlock());
+        }
+
+        if (match(TokenType::KeywordFinally)) {
+            hasFinally = true;
+            consume(TokenType::LBrace, "Expected '{' after finally");
+            stmt.finallyBody = parseBlock();
+        }
+
+        if (!hasCatch && !hasFinally) {
+            throw std::runtime_error(formatParseError("try requires catch and/or finally", previous()));
+        }
+
+        return stmt;
+    }
+
     if (match(TokenType::KeywordWhile)) {
         return parseWhileStatement();
     }
@@ -390,6 +448,21 @@ Stmt Parser::parseStatement() {
         stmt.line = returnToken.line;
         stmt.column = returnToken.column;
         stmt.expr = parseExpression();
+        consume(TokenType::Semicolon, "Expected ';'");
+        return stmt;
+    }
+
+    if (match(TokenType::KeywordThrow)) {
+        const Token& throwToken = previous();
+        Stmt stmt;
+        stmt.type = StmtType::Throw;
+        stmt.line = throwToken.line;
+        stmt.column = throwToken.column;
+        if (check(TokenType::Semicolon)) {
+            stmt.rethrow = true;
+        } else {
+            stmt.expr = parseExpression();
+        }
         consume(TokenType::Semicolon, "Expected ';'");
         return stmt;
     }
@@ -953,6 +1026,10 @@ Expr Parser::parsePrimary() {
         expr.column = previous().column;
         expr.name = "super";
         return parsePostfix(std::move(expr));
+    }
+
+    if (match(TokenType::KeywordAny) || match(TokenType::KeywordGlobal) || match(TokenType::KeywordBuiltin)) {
+        throw std::runtime_error(formatParseError("Reserved keyword cannot be used in expressions", previous()));
     }
 
     if (match(TokenType::LParen)) {

@@ -1,4 +1,5 @@
 #include "gs/runtime.hpp"
+#include "demo_bindings.hpp"
 
 #include <iostream>
 
@@ -10,6 +11,7 @@ int main(int argc, char** argv) {
 
     try {
         gs::Runtime runtime;
+        gs::demo::bindDefaultDemoExports(runtime.host());
 
         const std::string scriptName = argv[1];
         bool success = false;

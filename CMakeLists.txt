@@ -32,6 +32,7 @@ set(GS_LIB_SOURCES
     src/type_system/script_instance_type.cpp
     src/type_system/upvalue_cell_type.cpp
     src/type_system/type_object_type.cpp
+    src/type_system/exception_type.cpp
     src/type_system/file_type.cpp
     src/type_system/path_type.cpp
     src/type_system/regex_type.cpp
@@ -75,6 +76,7 @@ set(GS_LIB_HEADERS
     include/gs/type_system/script_instance_type.hpp
     include/gs/type_system/upvalue_cell_type.hpp
     include/gs/type_system/type_object_type.hpp
+    include/gs/type_system/exception_type.hpp
     include/gs/type_system/file_type.hpp
     include/gs/type_system/path_type.hpp
     include/gs/type_system/regex_type.hpp
@@ -131,9 +133,11 @@ if(GS_BUILD_DEMO)
     
     add_executable(run_test app/run_test.cpp)
     target_link_libraries(run_test PRIVATE gamescript)
+    target_sources(run_test PRIVATE app/demo_bindings.cpp app/demo_bindings.hpp)
 
     add_executable(run_bytecode app/run_bytecode.cpp)
     target_link_libraries(run_bytecode PRIVATE gamescript)
+    target_sources(run_bytecode PRIVATE app/demo_bindings.cpp app/demo_bindings.hpp)
 
-    source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES app/run_test.cpp app/run_bytecode.cpp)
+    source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES app/run_test.cpp app/run_bytecode.cpp app/demo_bindings.cpp app/demo_bindings.hpp)
 endif()

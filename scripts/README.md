@@ -29,6 +29,7 @@ Contains all test files for validating language features:
 - **lambda_toplevel_test.gs** - Top-level lambda tests
 - **unary_test.gs** - Unary operator tests
 - **callable_field_dispatch_test.gs** - Field dispatch tests
+- **test_exception_engine_bench.gs** - Exception pipeline benchmark (try/catch/typed match)
 
 #### Comment Syntax Tests
 - **comment_test.gs** - General comment parsing

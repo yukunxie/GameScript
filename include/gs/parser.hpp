@@ -67,10 +67,12 @@ enum class StmtType {
     ForList,
     ForDict,
     If,
+    Try,
     While,
     Break,
     Continue,
     Expr,
+    Throw,
     Return,
     Sleep,
     Yield
@@ -101,6 +103,11 @@ struct Stmt {
     std::vector<std::vector<Stmt>> branchBodies;
     std::vector<Stmt> elseBody;
     std::vector<Stmt> body;
+    std::vector<std::string> catchTypeNames;
+    std::vector<std::string> catchErrorNames;
+    std::vector<std::vector<Stmt>> catchBodies;
+    std::vector<Stmt> finallyBody;
+    bool rethrow{false};
 };
 
 struct FunctionDecl {

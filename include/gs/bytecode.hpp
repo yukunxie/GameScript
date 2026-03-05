@@ -16,6 +16,8 @@ enum class ValueType : std::uint8_t {
     Bool,
     Int,
     Float,
+    // Legacy representation for a string literal index into Module::strings.
+    // Runtime values should be normalized to StringObject refs.
     String,
     Ref,
     Function,
@@ -88,7 +90,9 @@ struct Value {
     bool isBool() const { return type == ValueType::Bool; }
     bool isInt() const { return type == ValueType::Int; }
     bool isFloat() const { return type == ValueType::Float; }
+    // Keep isString() for compatibility with existing call sites.
     bool isString() const { return type == ValueType::String; }
+    bool isLegacyStringLiteral() const { return type == ValueType::String; }
     bool isRef() const { return type == ValueType::Ref; }
     bool isFunction() const { return type == ValueType::Function; }
     bool isClass() const { return type == ValueType::Class; }
@@ -126,7 +130,7 @@ struct Value {
     }
 
     std::int64_t asStringIndex() const {
-        if (!isString()) {
+        if (!isLegacyStringLiteral()) {
             throw std::runtime_error("Value is not string");
         }
         return payload;
@@ -223,6 +227,11 @@ enum class OpCode : std::uint8_t {
     Jump,
     JumpIfFalse,
     JumpIfFalseReg,
+    TryBegin,
+    TryEnd,
+    Throw,
+    EndFinally,
+    MatchExceptionType,
     CallHost,
     CallFunc,
     NewInstance,
@@ -278,6 +287,7 @@ struct Instruction {
     SlotType bSlotType = SlotType::None;
     std::int32_t b : 24 = -1;
     std::size_t line{0};  // Source line number for debugging
+    std::size_t column{0};  // Source column number for debugging
 };
 
 struct FunctionBytecode {
