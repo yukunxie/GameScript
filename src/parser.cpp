@@ -93,6 +93,18 @@ const Token& Parser::consume(TokenType type, const char* message) {
     throw std::runtime_error(formatParseError(message, *errorToken));
 }
 
+std::string Parser::parseOptionalTypeAnnotation() {
+    if (!match(TokenType::Colon)) {
+        return {};
+    }
+
+    if (match(TokenType::Identifier) || match(TokenType::KeywordAny) || match(TokenType::KeywordStr)) {
+        return previous().text;
+    }
+
+    throw std::runtime_error(formatParseError("Expected type name after ':'", peek()));
+}
+
 ClassDecl Parser::parseClass() {
     consume(TokenType::KeywordClass, "Expected 'class'");
     ClassDecl cls;
@@ -115,6 +127,7 @@ ClassDecl Parser::parseClass() {
             attr.name = attrToken.text;
             attr.line = attrToken.line;
             attr.column = attrToken.column;
+            attr.declaredTypeName = parseOptionalTypeAnnotation();
             consume(TokenType::Equal, "Expected '=' after attribute name");
             attr.initializer = parseExpression();
             consume(TokenType::Semicolon, "Expected ';' after attribute declaration");
@@ -140,6 +153,7 @@ FunctionDecl Parser::parseFunction() {
     if (!check(TokenType::RParen)) {
         do {
             fn.params.push_back(consume(TokenType::Identifier, "Expected parameter name").text);
+            fn.paramTypeNames.push_back(parseOptionalTypeAnnotation());
         } while (match(TokenType::Comma));
     }
 
@@ -336,6 +350,7 @@ Stmt Parser::parseStatement() {
         stmt.line = letToken.line;
         stmt.column = letToken.column;
         stmt.name = consume(TokenType::Identifier, "Expected variable name").text;
+        stmt.declaredTypeName = parseOptionalTypeAnnotation();
         consume(TokenType::Equal, "Expected '='");
         if (match(TokenType::KeywordSpawn)) {
             stmt.type = StmtType::LetSpawn;

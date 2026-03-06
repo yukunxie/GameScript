@@ -1032,6 +1032,30 @@ std::string formatCompilerError(const std::string& message,
     return out.str();
 }
 
+std::string normalizeTypeAnnotationName(std::string typeName) {
+    typeName = trimCopy(typeName);
+    if (typeName.empty()) {
+        return {};
+    }
+
+    std::string lowered = typeName;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
+    if (lowered == "any") {
+        return "any";
+    }
+    if (lowered == "str") {
+        return "string";
+    }
+    return typeName;
+}
+
+bool isAnyTypeAnnotation(const std::string& typeName) {
+    return typeName.empty() || normalizeTypeAnnotationName(typeName) == "any";
+}
+
 std::string mangleMethodName(const std::string& className, const std::string& methodName) {
     return className + "::" + methodName;
 }
@@ -1464,6 +1488,9 @@ std::size_t ensureLocal(std::unordered_map<std::string, std::size_t>& locals,
             functionIr->localDebugNames.resize(slot + 1);
         }
         functionIr->localDebugNames[slot] = name;
+        if (functionIr->localTypeNames.size() <= slot) {
+            functionIr->localTypeNames.resize(slot + 1);
+        }
     }
     ++localCount;
     return slot;
@@ -2501,12 +2528,15 @@ void compileExpr(const Expr& expr,
         FunctionBytecode lambdaBytecode;
         lambdaBytecode.name = lambdaName;
         lambdaBytecode.params = expr.lambdaDecl->params;
+        lambdaBytecode.paramTypeNames.assign(expr.lambdaDecl->params.size(), "");
         lambdaBytecode.localCount = expr.lambdaDecl->params.size();
+        lambdaBytecode.localTypeNames.assign(lambdaBytecode.localCount, "");
         module.functions.push_back(std::move(lambdaBytecode));
 
         FunctionIR lambdaIr;
         lambdaIr.name = lambdaName;
         lambdaIr.params = expr.lambdaDecl->params;
+        lambdaIr.paramTypeNames.assign(expr.lambdaDecl->params.size(), "");
         lambdaIr.localCount = expr.lambdaDecl->params.size();
 
         std::unordered_map<std::string, std::size_t> lambdaLocalsMap;
@@ -2514,6 +2544,7 @@ void compileExpr(const Expr& expr,
             lambdaLocalsMap[expr.lambdaDecl->params[i]] = i;
         }
         lambdaIr.localDebugNames = expr.lambdaDecl->params;
+        lambdaIr.localTypeNames.assign(lambdaIr.localCount, "");
 
         std::unordered_map<std::string, std::size_t> lambdaConstTempSlots;
         compileStatements(expr.lambdaDecl->body,
@@ -2799,6 +2830,9 @@ void compileStatements(const std::vector<Stmt>& statements,
                                                                  stmt.column));
                 }
                 const auto slot = ensureLocal(locals, out.localCount, stmt.name, &out);
+                if (!isAnyTypeAnnotation(stmt.declaredTypeName)) {
+                    out.localTypeNames[slot] = normalizeTypeAnnotationName(stmt.declaredTypeName);
+                }
                 Value letConstValue = Value::Nil();
                 if (tryExtractConstValue(stmt.expr, module, letConstValue)) {
                     emit(out.code,
@@ -3487,7 +3521,15 @@ Module Compiler::compile(const Program& program) {
         FunctionBytecode compiled;
         compiled.name = fn.name;
         compiled.params = fn.params;
+        compiled.paramTypeNames = fn.paramTypeNames;
+        if (compiled.paramTypeNames.size() < compiled.params.size()) {
+            compiled.paramTypeNames.resize(compiled.params.size());
+        }
+        for (auto& typeName : compiled.paramTypeNames) {
+            typeName = normalizeTypeAnnotationName(typeName);
+        }
         compiled.localCount = fn.params.size();
+        compiled.localTypeNames.assign(compiled.localCount, "");
 
         funcIndex[fn.name] = module.functions.size();
         module.functions.push_back(std::move(compiled));
@@ -3498,6 +3540,7 @@ Module Compiler::compile(const Program& program) {
         FunctionBytecode moduleInit;
         moduleInit.name = moduleInitName;
         moduleInit.localCount = 0;
+        moduleInit.localTypeNames.clear();
         funcIndex[moduleInitName] = module.functions.size();
         module.functions.push_back(std::move(moduleInit));
     }
@@ -3516,7 +3559,7 @@ Module Compiler::compile(const Program& program) {
         }
 
         if (!declaredModuleGlobals.contains(stmt.name)) {
-            module.globals.push_back({stmt.name, Value::Nil()});
+            module.globals.push_back({stmt.name, Value::Nil(), normalizeTypeAnnotationName(stmt.declaredTypeName)});
             declaredModuleGlobals.insert(stmt.name);
         }
     }
@@ -3567,11 +3610,13 @@ Module Compiler::compile(const Program& program) {
         }
 
         for (const auto& attr : cls.attributes) {
-            classBc.attributes.push_back({attr.name, evalClassFieldInit(attr.initializer,
-                                                                        module,
-                                                                        funcIndex,
-                                                                        classIndex,
-                                                                        cls.name + "::<attr>" )});
+            classBc.attributes.push_back({attr.name,
+                                          evalClassFieldInit(attr.initializer,
+                                                             module,
+                                                             funcIndex,
+                                                             classIndex,
+                                                             cls.name + "::<attr>"),
+                                          normalizeTypeAnnotationName(attr.declaredTypeName)});
         }
 
         bool hasCtor = false;
@@ -3596,7 +3641,15 @@ Module Compiler::compile(const Program& program) {
             FunctionBytecode compiled;
             compiled.name = mangled;
             compiled.params = method.params;
+            compiled.paramTypeNames = method.paramTypeNames;
+            if (compiled.paramTypeNames.size() < compiled.params.size()) {
+                compiled.paramTypeNames.resize(compiled.params.size());
+            }
+            for (auto& typeName : compiled.paramTypeNames) {
+                typeName = normalizeTypeAnnotationName(typeName);
+            }
             compiled.localCount = method.params.size();
+            compiled.localTypeNames.assign(compiled.localCount, "");
             const std::size_t idx = module.functions.size();
             funcIndex[mangled] = idx;
             module.functions.push_back(std::move(compiled));
@@ -3618,12 +3671,17 @@ Module Compiler::compile(const Program& program) {
         FunctionIR functionIr;
         functionIr.name = out.name;
         functionIr.params = out.params;
+        functionIr.paramTypeNames = out.paramTypeNames;
         functionIr.localCount = out.params.size();
         std::unordered_map<std::string, std::size_t> locals;
         for (std::size_t i = 0; i < functionIr.params.size(); ++i) {
             locals[functionIr.params[i]] = i;
         }
         functionIr.localDebugNames = functionIr.params;
+        functionIr.localTypeNames = functionIr.paramTypeNames;
+        if (functionIr.localTypeNames.size() < functionIr.localCount) {
+            functionIr.localTypeNames.resize(functionIr.localCount);
+        }
         std::unordered_map<std::string, std::size_t> constTempSlots;
         compileStatements(fn.body,
                           module,
@@ -3654,12 +3712,17 @@ Module Compiler::compile(const Program& program) {
             FunctionIR functionIr;
             functionIr.name = out.name;
             functionIr.params = out.params;
+            functionIr.paramTypeNames = out.paramTypeNames;
             functionIr.localCount = out.params.size();
             std::unordered_map<std::string, std::size_t> locals;
             for (std::size_t i = 0; i < functionIr.params.size(); ++i) {
                 locals[functionIr.params[i]] = i;
             }
             functionIr.localDebugNames = functionIr.params;
+            functionIr.localTypeNames = functionIr.paramTypeNames;
+            if (functionIr.localTypeNames.size() < functionIr.localCount) {
+                functionIr.localTypeNames.resize(functionIr.localCount);
+            }
             std::unordered_map<std::string, std::size_t> constTempSlots;
 
             compileStatements(method.body,
@@ -3690,7 +3753,9 @@ Module Compiler::compile(const Program& program) {
         FunctionIR functionIr;
         functionIr.name = out.name;
         functionIr.params = out.params;
+        functionIr.paramTypeNames = out.paramTypeNames;
         functionIr.localCount = out.localCount;
+        functionIr.localTypeNames = out.localTypeNames;
         std::unordered_map<std::string, std::size_t> locals;
         std::unordered_map<std::string, std::size_t> constTempSlots;
         compileStatements(program.topLevelStatements,
@@ -3855,7 +3920,7 @@ bool compileDisassemblyDumpEnabled() {
 
 std::string serializeModuleText(const Module& module) {
     std::ostringstream out;
-    out << "GSBC1\n";
+    out << "GSBC2\n";
     out << module.constants.size() << "\n";
     for (auto c : module.constants) {
         out << static_cast<int>(c.type) << ' ' << c.payload << "\n";
@@ -3873,8 +3938,16 @@ std::string serializeModuleText(const Module& module) {
         for (const auto& p : fn.params) {
             out << std::quoted(p) << "\n";
         }
+        out << fn.paramTypeNames.size() << "\n";
+        for (const auto& t : fn.paramTypeNames) {
+            out << std::quoted(t) << "\n";
+        }
         out << fn.localCount << "\n";
         out << fn.stackSlotCount << "\n";
+        out << fn.localTypeNames.size() << "\n";
+        for (const auto& t : fn.localTypeNames) {
+            out << std::quoted(t) << "\n";
+        }
         out << fn.code.size() << "\n";
         for (const auto& ins : fn.code) {
             out << static_cast<int>(ins.op) << ' '
@@ -3892,7 +3965,7 @@ std::string serializeModuleText(const Module& module) {
         out << cls.attributes.size() << "\n";
         for (const auto& attr : cls.attributes) {
             out << std::quoted(attr.name) << " " << static_cast<int>(attr.defaultValue.type) << " "
-                << attr.defaultValue.payload << "\n";
+                << attr.defaultValue.payload << " " << std::quoted(attr.declaredTypeName) << "\n";
         }
         out << cls.methods.size() << "\n";
         for (const auto& method : cls.methods) {
@@ -3903,7 +3976,7 @@ std::string serializeModuleText(const Module& module) {
     out << module.globals.size() << "\n";
     for (const auto& global : module.globals) {
         out << std::quoted(global.name) << " " << static_cast<int>(global.initialValue.type)
-            << " " << global.initialValue.payload << "\n";
+            << " " << global.initialValue.payload << " " << std::quoted(global.declaredTypeName) << "\n";
     }
 
     return out.str();
@@ -3913,7 +3986,8 @@ Module deserializeModuleText(const std::string& text) {
     std::istringstream in(text);
     std::string magic;
     std::getline(in, magic);
-    if (magic != "GSBC1") {
+    const bool hasTypeMetadata = (magic == "GSBC2");
+    if (!hasTypeMetadata && magic != "GSBC1") {
         throwCompilerError("Invalid bytecode header");
     }
 
@@ -3950,8 +4024,30 @@ Module deserializeModuleText(const std::string& text) {
             fn.params.push_back(std::move(param));
         }
 
+        if (hasTypeMetadata) {
+            std::size_t paramTypeCount = 0;
+            in >> paramTypeCount;
+            fn.paramTypeNames.reserve(paramTypeCount);
+            for (std::size_t p = 0; p < paramTypeCount; ++p) {
+                std::string typeName;
+                in >> std::quoted(typeName);
+                fn.paramTypeNames.push_back(std::move(typeName));
+            }
+        }
+
         in >> fn.localCount;
-    in >> fn.stackSlotCount;
+        in >> fn.stackSlotCount;
+
+        if (hasTypeMetadata) {
+            std::size_t localTypeCount = 0;
+            in >> localTypeCount;
+            fn.localTypeNames.reserve(localTypeCount);
+            for (std::size_t lt = 0; lt < localTypeCount; ++lt) {
+                std::string typeName;
+                in >> std::quoted(typeName);
+                fn.localTypeNames.push_back(std::move(typeName));
+            }
+        }
 
         std::size_t codeCount = 0;
         in >> codeCount;
@@ -3998,6 +4094,9 @@ Module deserializeModuleText(const std::string& text) {
             ClassAttributeBinding attr;
             int type = 0;
             in >> std::quoted(attr.name) >> type >> attr.defaultValue.payload;
+            if (hasTypeMetadata) {
+                in >> std::quoted(attr.declaredTypeName);
+            }
             attr.defaultValue.type = static_cast<ValueType>(type);
             cls.attributes.push_back(std::move(attr));
         }
@@ -4019,6 +4118,9 @@ Module deserializeModuleText(const std::string& text) {
         GlobalBinding global;
         int type = 0;
         in >> std::quoted(global.name) >> type >> global.initialValue.payload;
+        if (hasTypeMetadata) {
+            in >> std::quoted(global.declaredTypeName);
+        }
         global.initialValue.type = static_cast<ValueType>(type);
         module.globals.push_back(std::move(global));
     }
@@ -4072,8 +4174,14 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
         for (const auto& p : fn.params) {
             out << "        f.params.push_back(" << std::quoted(p) << ");\n";
         }
+        for (const auto& t : fn.paramTypeNames) {
+            out << "        f.paramTypeNames.push_back(" << std::quoted(t) << ");\n";
+        }
         out << "        f.localCount = " << fn.localCount << ";\n";
         out << "        f.stackSlotCount = " << fn.stackSlotCount << ";\n";
+        for (const auto& t : fn.localTypeNames) {
+            out << "        f.localTypeNames.push_back(" << std::quoted(t) << ");\n";
+        }
         for (const auto& ins : fn.code) {
             out << "        f.code.push_back(gs::Instruction{gs::OpCode::";
             out << opcodeName(ins.op);
@@ -4135,7 +4243,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
                 out << "gs::Value::Module(" << attr.defaultValue.payload << ")";
                 break;
             }
-            out << "});\n";
+            out << ", " << std::quoted(attr.declaredTypeName) << "});\n";
         }
         for (const auto& method : cls.methods) {
             out << "        c.methods.push_back(gs::ClassMethodBinding{" << std::quoted(method.name)
@@ -4174,7 +4282,7 @@ std::string generateAotCpp(const Module& module, const std::string& variableName
             out << "gs::Value::Module(" << global.initialValue.payload << ")";
             break;
         }
-        out << "});\n";
+        out << ", " << std::quoted(global.declaredTypeName) << "});\n";
     }
 
     out << "    return m;\n";

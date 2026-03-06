@@ -8,6 +8,7 @@
 #include <chrono>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
@@ -1331,6 +1332,90 @@ std::string typeNameOfValue(const ExecutionContext& context, const Value& value)
     return object->getType().name();
 }
 
+#ifndef NDEBUG
+std::string toLowerAscii(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return text;
+}
+
+std::string normalizeDeclaredTypeName(std::string typeName) {
+    if (typeName.empty()) {
+        return {};
+    }
+    const std::string lowered = toLowerAscii(typeName);
+    if (lowered == "str") {
+        return "string";
+    }
+    if (lowered == "any") {
+        return "any";
+    }
+    return typeName;
+}
+
+bool isAnyDeclaredType(const std::string& typeName) {
+    return typeName.empty() || toLowerAscii(normalizeDeclaredTypeName(typeName)) == "any";
+}
+
+bool valueMatchesDeclaredType(const ExecutionContext& context,
+                             const std::string& declaredType,
+                             const Value& value) {
+    if (isAnyDeclaredType(declaredType)) {
+        return true;
+    }
+
+    const std::string actualType = typeNameOfValue(context, value);
+    const std::string expectedNorm = normalizeDeclaredTypeName(declaredType);
+    if (actualType == expectedNorm) {
+        return true;
+    }
+
+    return toLowerAscii(actualType) == toLowerAscii(expectedNorm);
+}
+
+void debugEnsureTypeMatch(const ExecutionContext& context,
+                          const std::string& declaredType,
+                          const Value& value,
+                          const std::string& targetName) {
+    if (isAnyDeclaredType(declaredType)) {
+        return;
+    }
+    if (valueMatchesDeclaredType(context, declaredType, value)) {
+        return;
+    }
+
+    throw std::runtime_error("Type mismatch for " + targetName + ": expected " +
+                             normalizeDeclaredTypeName(declaredType) +
+                             ", got " + typeNameOfValue(context, value));
+}
+
+const std::string* findGlobalDeclaredType(const Module& module, const std::string& symbolName) {
+    for (const auto& global : module.globals) {
+        if (global.name == symbolName) {
+            return &global.declaredTypeName;
+        }
+    }
+    return nullptr;
+}
+
+const std::string* findClassAttributeDeclaredType(const Module& module,
+                                                  std::size_t classIndex,
+                                                  const std::string& attrName) {
+    std::int32_t walk = static_cast<std::int32_t>(classIndex);
+    while (walk >= 0) {
+        const auto& cls = module.classes.at(static_cast<std::size_t>(walk));
+        for (const auto& attr : cls.attributes) {
+            if (attr.name == attrName) {
+                return &attr.declaredTypeName;
+            }
+        }
+        walk = cls.baseClassIndex;
+    }
+    return nullptr;
+}
+#endif
+
 Value makeRuntimeString(ExecutionContext& context, const std::string& text) {
     static StringType runtimeStringType;
     return emplaceObject(context, std::make_unique<StringObject>(runtimeStringType, text));
@@ -1884,15 +1969,22 @@ void initializeInstanceAttributes(const Module& module,
     }
 
     for (const auto& attr : cls.attributes) {
-        instance.fields()[attr.name] = normalizeRuntimeValue(context,
-                                                             functionType,
-                                                             classType,
-                                                             nativeFunctionType,
-                                                             moduleType,
-                                                             hosts,
-                                                             modulePin,
-                                                             attr.defaultValue,
-                                                             true);
+        const Value normalized = normalizeRuntimeValue(context,
+                                                       functionType,
+                                                       classType,
+                                                       nativeFunctionType,
+                                                       moduleType,
+                                                       hosts,
+                                                       modulePin,
+                                                       attr.defaultValue,
+                                                       true);
+#ifndef NDEBUG
+        debugEnsureTypeMatch(context,
+                             attr.declaredTypeName,
+                             normalized,
+                             "class attribute '" + cls.name + "." + attr.name + "'");
+#endif
+        instance.fields()[attr.name] = normalized;
     }
 }
 
@@ -1973,6 +2065,19 @@ void VirtualMachine::pushCallFrame(ExecutionContext& ctx,
     if (args.size() != fn.params.size()) {
         throw std::runtime_error("Function argument count mismatch: " + fn.name);
     }
+
+#ifndef NDEBUG
+    for (std::size_t i = 0; i < args.size() && i < fn.paramTypeNames.size(); ++i) {
+        const std::string& declaredType = fn.paramTypeNames[i];
+        if (isAnyDeclaredType(declaredType)) {
+            continue;
+        }
+        debugEnsureTypeMatch(ctx,
+                             declaredType,
+                             args[i],
+                             "parameter '" + fn.params[i] + "' of " + fn.name);
+    }
+#endif
 
     Frame frame;
     frame.functionIndex = functionIndex;
@@ -2344,6 +2449,18 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
             break;
         case OpCode::StoreLocal: {
             const Value v = popRaw(frame.stack, frame.stackTop);
+#ifndef NDEBUG
+            if (ins.a >= 0 && static_cast<std::size_t>(ins.a) < fn.localTypeNames.size()) {
+                const std::string& declaredType = fn.localTypeNames[static_cast<std::size_t>(ins.a)];
+                debugEnsureTypeMatch(context,
+                                     declaredType,
+                                     v,
+                                     "local variable '" +
+                                         (static_cast<std::size_t>(ins.a) < fn.params.size()
+                                              ? fn.params[static_cast<std::size_t>(ins.a)]
+                                              : ("slot#" + std::to_string(ins.a))) + "'");
+            }
+#endif
             Value& localValue = frame.locals.at(ins.a);
             if (localValue.isRef()) {
                 Object* localObject = localValue.asRef();
@@ -2361,6 +2478,14 @@ bool VirtualMachine::execute(ExecutionContext& context, std::size_t stepBudget) 
         case OpCode::StoreName: {
             const Value value = popRaw(frame.stack, frame.stackTop);
             const auto& symbolName = frameModule->strings.at(ins.a);
+#ifndef NDEBUG
+            if (const std::string* declaredType = findGlobalDeclaredType(*frameModule, symbolName)) {
+                debugEnsureTypeMatch(context,
+                                     *declaredType,
+                                     value,
+                                     "global variable '" + symbolName + "'");
+            }
+#endif
             storeRuntimeGlobal(context, frameModule, symbolName, value);
             break;
         }
@@ -3542,6 +3667,18 @@ load_attr_done:
                                                            assigned,
                                                            false);
             if (auto* instance = dynamic_cast<ScriptInstanceObject*>(&object)) {
+#ifndef NDEBUG
+                if (instance->modulePin() && instance->classIndex() < instance->modulePin()->classes.size()) {
+                    if (const std::string* declaredType = findClassAttributeDeclaredType(*instance->modulePin(),
+                                                                                          instance->classIndex(),
+                                                                                          attrName)) {
+                        debugEnsureTypeMatch(context,
+                                             *declaredType,
+                                             normalized,
+                                             "attribute '" + instance->className() + "." + attrName + "'");
+                    }
+                }
+#endif
                 if (attrName == "__native_base__") {
                     throw std::runtime_error("__native_base__ is read-only");
                 }
@@ -3934,6 +4071,18 @@ call_method_done:
                                                            frameModule,
                                                            frameModule->constants.at(ins.a),
                                                            true);
+#ifndef NDEBUG
+                if (ins.b >= 0 && static_cast<std::size_t>(ins.b) < fn.localTypeNames.size()) {
+                    const std::string& declaredType = fn.localTypeNames[static_cast<std::size_t>(ins.b)];
+                    debugEnsureTypeMatch(context,
+                                         declaredType,
+                                         loaded,
+                                         "local variable '" +
+                                             (static_cast<std::size_t>(ins.b) < fn.params.size()
+                                                  ? fn.params[static_cast<std::size_t>(ins.b)]
+                                                  : ("slot#" + std::to_string(ins.b))) + "'");
+                }
+#endif
                 Value& localValue = frame.locals.at(ins.b);
                 if (localValue.isRef()) {
                     Object* localObject = localValue.asRef();
@@ -4012,6 +4161,18 @@ call_method_done:
         }
         case OpCode::StoreLocalFromReg:
             {
+#ifndef NDEBUG
+                if (ins.a >= 0 && static_cast<std::size_t>(ins.a) < fn.localTypeNames.size()) {
+                    const std::string& declaredType = fn.localTypeNames[static_cast<std::size_t>(ins.a)];
+                    debugEnsureTypeMatch(context,
+                                         declaredType,
+                                         readRegister(ins.b),
+                                         "local variable '" +
+                                             (static_cast<std::size_t>(ins.a) < fn.params.size()
+                                                  ? fn.params[static_cast<std::size_t>(ins.a)]
+                                                  : ("slot#" + std::to_string(ins.a))) + "'");
+                }
+#endif
                 Value& localValue = frame.locals.at(ins.a);
                 if (localValue.isRef()) {
                     Object* localObject = localValue.asRef();
@@ -4028,6 +4189,14 @@ call_method_done:
             break;
         case OpCode::StoreNameFromReg: {
             const auto& symbolName = frameModule->strings.at(ins.a);
+#ifndef NDEBUG
+            if (const std::string* declaredType = findGlobalDeclaredType(*frameModule, symbolName)) {
+                debugEnsureTypeMatch(context,
+                                     *declaredType,
+                                     readRegister(ins.b),
+                                     "global variable '" + symbolName + "'");
+            }
+#endif
             storeRuntimeGlobal(context, frameModule, symbolName, readRegister(ins.b));
             break;
         }
