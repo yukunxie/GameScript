@@ -88,6 +88,7 @@ struct Stmt {
     std::size_t line{0};
     std::size_t column{0};
     std::string name;
+    std::string declaredTypeName;
     Expr expr;
     CallData call;
     std::string awaitSource;
@@ -115,6 +116,7 @@ struct FunctionDecl {
     std::size_t column{0};
     std::string name;
     std::vector<std::string> params;
+    std::vector<std::string> paramTypeNames;
     std::vector<Stmt> body;
 };
 
@@ -122,6 +124,7 @@ struct ClassAttrDecl {
     std::size_t line{0};
     std::size_t column{0};
     std::string name;
+    std::string declaredTypeName;
     Expr initializer;
 };
 
@@ -178,6 +181,7 @@ private:
     Expr parseUnary();
     Expr parsePower();
     Expr parsePrimary();
+    std::string parseOptionalTypeAnnotation();
     bool isLambdaStart() const;
     std::string currentScopeName() const;
     std::string formatParseError(const char* message, const Token& token) const;

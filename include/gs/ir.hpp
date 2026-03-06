@@ -23,9 +23,11 @@ struct IRInstruction {
 struct FunctionIR {
     std::string name;
     std::vector<std::string> params;
+    std::vector<std::string> paramTypeNames;
     std::vector<IRInstruction> code;
     std::size_t localCount{0};
     std::vector<std::string> localDebugNames;
+    std::vector<std::string> localTypeNames;
 };
 
 inline int stackDelta(const IRInstruction& instruction) {
@@ -139,7 +141,9 @@ inline FunctionBytecode lowerFunctionIR(const FunctionIR& ir) {
     FunctionBytecode out;
     out.name = ir.name;
     out.params = ir.params;
+    out.paramTypeNames = ir.paramTypeNames;
     out.localCount = ir.localCount;
+    out.localTypeNames = ir.localTypeNames;
     out.stackSlotCount = estimateStackSlots(ir);
     out.code.reserve(ir.code.size());
     for (const auto& instruction : ir.code) {

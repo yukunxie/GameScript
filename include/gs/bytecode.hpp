@@ -293,9 +293,11 @@ struct Instruction {
 struct FunctionBytecode {
     std::string name;
     std::vector<std::string> params;
+    std::vector<std::string> paramTypeNames;
     std::vector<Instruction> code;
     std::size_t localCount{0};
     std::size_t stackSlotCount{0};
+    std::vector<std::string> localTypeNames;
 };
 
 struct ClassMethodBinding {
@@ -306,6 +308,7 @@ struct ClassMethodBinding {
 struct ClassAttributeBinding {
     std::string name;
     Value defaultValue{Value::Nil()};
+    std::string declaredTypeName;
 };
 
 struct ClassBytecode {
@@ -319,6 +322,7 @@ struct ClassBytecode {
 struct GlobalBinding {
     std::string name;
     Value initialValue{Value::Nil()};
+    std::string declaredTypeName;
 };
 
 struct Module {
