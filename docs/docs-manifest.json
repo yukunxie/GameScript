@@ -1,0 +1,41 @@
+{
+  "sections": [
+    {
+      "title": "Start",
+      "docs": [
+        { "title": "Start Here", "path": "START_HERE.md" },
+        { "title": "Docs Overview", "path": "DOCS_OVERVIEW.md" },
+        { "title": "Website Deployment", "path": "WEBSITE_DEPLOYMENT.md" },
+        { "title": "Language Tutorial", "path": "LANGUAGE_TUTORIAL.md" },
+        { "title": "Language Reference", "path": "LANGUAGE_REFERENCE.md" },
+        { "title": "Design Architecture", "path": "DESIGN_ARCHITECTURE.md" }
+      ]
+    },
+    {
+      "title": "Runtime and Language",
+      "docs": [
+        { "title": "Parameter Unpack Spec", "path": "features/PARAMETER_UNPACK_SPEC.md" },
+        { "title": "Type Object", "path": "TypeObject.md" },
+        { "title": "G1 Lite Design", "path": "g1-lite-design.md" }
+      ]
+    },
+    {
+      "title": "Binding",
+      "docs": [
+        { "title": "Binding API", "path": "BINDING_API.md" },
+        { "title": "Binding v2 Guide", "path": "BINDING_V2_GUIDE.md" },
+        { "title": "Binding v2 README", "path": "BINDING_V2_README.md" },
+        { "title": "Binding v2 Refactoring", "path": "BINDING_V2_REFACTORING.md" },
+        { "title": "Binding v2 CMake Integration", "path": "BINDING_V2_CMAKE_INTEGRATION.md" },
+        { "title": "Binding v2 Migration Complete", "path": "BINDING_V2_MIGRATION_COMPLETE.md" }
+      ]
+    },
+    {
+      "title": "Benchmark",
+      "docs": [
+        { "title": "Benchmark Guide", "path": "BENCHMARK_GUIDE.md" },
+        { "title": "Benchmark Integration", "path": "BENCHMARK_INTEGRATION.md" }
+      ]
+    }
+  ]
+}

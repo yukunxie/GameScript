@@ -107,6 +107,56 @@ function formatGsText(text, options) {
 }
 
 function activate(context) {
+  const ellipsisDecoration = vscode.window.createTextEditorDecorationType({
+    light: {
+      color: '#B54708',
+      fontWeight: '400',
+    },
+    dark: {
+      color: '#FFD166',
+      fontWeight: '400',
+    },
+  });
+
+  const applyEllipsisDecorations = (editor) => {
+    if (!editor || editor.document.languageId !== 'gs') {
+      return;
+    }
+
+    const text = editor.document.getText();
+    const ranges = [];
+    const regex = /\.\.\./g;
+    let match = regex.exec(text);
+    while (match) {
+      const start = editor.document.positionAt(match.index);
+      const end = editor.document.positionAt(match.index + 3);
+      ranges.push(new vscode.Range(start, end));
+      match = regex.exec(text);
+    }
+
+    editor.setDecorations(ellipsisDecoration, ranges);
+  };
+
+  const refreshActiveEditorEllipsis = () => {
+    applyEllipsisDecorations(vscode.window.activeTextEditor);
+  };
+
+  refreshActiveEditorEllipsis();
+
+  context.subscriptions.push(
+    ellipsisDecoration,
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      applyEllipsisDecorations(editor);
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (!activeEditor || event.document !== activeEditor.document) {
+        return;
+      }
+      applyEllipsisDecorations(activeEditor);
+    })
+  );
+
   const disposable = vscode.commands.registerCommand('gs.addLineComment', async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
@@ -145,7 +195,15 @@ function activate(context) {
     },
   });
 
-  context.subscriptions.push(disposable, formatter);
+  context.subscriptions.push(
+    disposable,
+    formatter,
+    vscode.window.onDidChangeVisibleTextEditors((editors) => {
+      for (const editor of editors) {
+        applyEllipsisDecorations(editor);
+      }
+    })
+  );
 }
 
 function deactivate() {}

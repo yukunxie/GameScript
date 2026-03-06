@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GameScript Docs</title>
+  <meta name="description" content="GameScript documentation portal with Markdown rendering for static deployment.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./assets/site.css">
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">GS</span>
+      <div>
+        <h1>GameScript Documentation</h1>
+        <p>Static Markdown docs for quick browsing and deployment</p>
+      </div>
+    </div>
+    <a class="repo-link" href="../README.md">Project README</a>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <div class="sidebar-head">
+        <h2>Documents</h2>
+        <input id="search-input" type="search" placeholder="Filter docs..." aria-label="Filter docs">
+      </div>
+      <nav id="doc-nav" class="doc-nav"></nav>
+    </aside>
+
+    <section class="content-shell">
+      <div id="doc-meta" class="doc-meta"></div>
+      <article id="doc-content" class="doc-content" aria-live="polite"></article>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="./assets/site.js"></script>
+</body>
+</html>
